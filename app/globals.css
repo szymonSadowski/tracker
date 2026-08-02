@@ -94,7 +94,8 @@ h2 {
 }
 
 select,
-input[type='text'] {
+input[type='text'],
+input[type='date'] {
   font: inherit;
   padding: 0.3rem 0.45rem;
   border: 1px solid var(--border);
@@ -332,6 +333,15 @@ td.absent {
   display: inline-flex;
   gap: 0.4rem;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+/* A choice between two shapes of the same request, so the label reads as one unit. */
+.inline-form label {
+  display: inline-flex;
+  gap: 0.3rem;
+  align-items: center;
+  white-space: nowrap;
 }
 
 .stack {

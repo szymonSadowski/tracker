@@ -85,6 +85,11 @@ export async function seedRepository(
     inScope: boolean;
     backfillState: string;
     syncedThrough: Date | null;
+    backfillWindowStart: Date | null;
+    historyCoveredFrom: Date | null;
+    historyComplete: boolean;
+    historyCursor: string | null;
+    historyState: string;
   }> = {},
 ): Promise<{ id: string; nodeId: string; fullName: string }> {
   const n = next();
@@ -94,8 +99,9 @@ export async function seedRepository(
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO repositories
        (workspace_id, node_id, github_repo_id, owner_login, name, full_name, in_scope,
-        backfill_state, synced_through)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        backfill_state, synced_through, backfill_window_start, history_covered_from,
+        history_complete, history_cursor, history_state)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id`,
     [
       workspaceId,
       nodeId,
@@ -106,6 +112,11 @@ export async function seedRepository(
       overrides.inScope ?? true,
       overrides.backfillState ?? 'complete',
       overrides.syncedThrough ?? null,
+      overrides.backfillWindowStart ?? null,
+      overrides.historyCoveredFrom ?? null,
+      overrides.historyComplete ?? false,
+      overrides.historyCursor ?? null,
+      overrides.historyState ?? 'idle',
     ],
   );
   return { id: rows[0]!.id, nodeId, fullName: `${ownerLogin}/${name}` };

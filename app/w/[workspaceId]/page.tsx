@@ -15,6 +15,7 @@ import { listRepositories, syncStatus } from '@/repositories/store';
 import {
   Card,
   ColdStart,
+  CoverageNotice,
   DataCompleteness,
   MetricCard,
   PeriodSelector,
@@ -172,6 +173,12 @@ export default async function TeamViewPage({
       />
 
       <DataCompleteness {...status} isOwner={isOwner} />
+      <CoverageNotice
+        periodStart={period.start}
+        coverageStart={status.coverageStart}
+        historySyncing={status.historySyncing}
+        historySyncHref={isOwner ? `/w/${workspaceId}/settings` : undefined}
+      />
 
       <div className="cards">
         <Card

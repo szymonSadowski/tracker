@@ -153,29 +153,53 @@ export async function enqueueWorkspaceSyncs(
   });
 }
 
+export interface OnDemandSyncOutcome {
+  enqueued: number;
+  debounced: boolean;
+  /**
+   * Repositories left to their backfill job. Reported so a zero-enqueued result can be explained
+   * rather than looking like a dead button (spec: "Member triggers a sync during backfill").
+   */
+  backfilling: { id: string; fullName: string }[];
+}
+
 /**
- * On-demand sync (spec: "Members can trigger a sync on demand"). Debounced per workspace: a
- * request inside the debounce window is accepted but enqueues nothing new.
+ * On-demand sync (spec: "Members can trigger a sync on demand"). Debounced: a request inside the
+ * debounce window is accepted but enqueues nothing new.
+ *
+ * `repositoryId` narrows the request to one repository, which is what the pull request list offers
+ * when it is filtered to a single one. The debounce narrows with it — a workspace-wide sync a
+ * moment ago should not silence a request for one repository, and vice versa — so the window is
+ * measured against requests for the same target.
  */
 export async function requestOnDemandSync(
   database: Database,
   workspaceId: string,
   debounceSeconds: number,
-): Promise<{ enqueued: number; debounced: boolean }> {
+  options: { repositoryId?: string } = {},
+): Promise<OnDemandSyncOutcome> {
   return database.transaction(async (tx) => {
+    const all = await listRepositories(tx, workspaceId, { inScopeOnly: true });
+    const repositories = options.repositoryId
+      ? all.filter((repository) => repository.id === options.repositoryId)
+      : all;
+    const backfilling = repositories
+      .filter((repository) => repository.backfillState !== 'complete')
+      .map((repository) => ({ id: repository.id, fullName: repository.fullName }));
+
     const { rows } = await tx.query<{ recent: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM jobs
           WHERE workspace_id = $1
             AND type = 'repository.incremental_sync'
             AND payload->>'reason' = 'on_demand'
+            AND ($3::text IS NULL OR payload->>'repositoryId' = $3::text)
             AND created_at > now() - make_interval(secs => $2::double precision)
        ) AS recent`,
-      [workspaceId, debounceSeconds],
+      [workspaceId, debounceSeconds, options.repositoryId ?? null],
     );
-    if (rows[0]!.recent) return { enqueued: 0, debounced: true };
+    if (rows[0]!.recent) return { enqueued: 0, debounced: true, backfilling };
 
-    const repositories = await listRepositories(tx, workspaceId, { inScopeOnly: true });
     let enqueued = 0;
     for (const repository of repositories) {
       if (repository.backfillState !== 'complete') continue;
@@ -188,6 +212,6 @@ export async function requestOnDemandSync(
       });
       if (job) enqueued++;
     }
-    return { enqueued, debounced: false };
+    return { enqueued, debounced: false, backfilling };
   });
 }

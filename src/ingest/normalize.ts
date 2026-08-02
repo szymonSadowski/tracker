@@ -11,7 +11,7 @@ import type { Queryable } from '../db/driver';
 import { enqueue } from '../jobs/queue';
 import { isBotAccount, type NormalizedActor, type NormalizedPullRequest } from './model';
 
-export type IngestSource = 'graphql_backfill' | 'rest_incremental' | 'webhook';
+export type IngestSource = 'graphql_backfill' | 'graphql_history' | 'rest_incremental' | 'webhook';
 
 export interface PersistOptions {
   workspaceId: string;

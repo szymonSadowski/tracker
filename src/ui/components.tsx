@@ -1,8 +1,16 @@
 /** Shared presentation pieces for the read surfaces (spec: analytics-dashboard). */
 import Link from 'next/link';
 import type { ReactNode } from 'react';
-import { coverageNote, formatDate, relativeTime, UNAVAILABLE } from './format';
+import {
+  coverageLabel,
+  coverageNote,
+  formatDate,
+  formatDay,
+  relativeTime,
+  UNAVAILABLE,
+} from './format';
 import type { MetricSummary } from '../analysis/aggregate';
+import type { HistoryState } from '../repositories/store';
 
 export function Card({
   label,
@@ -110,11 +118,83 @@ export function PeriodSelector({
   );
 }
 
+export interface CoverageDisplay {
+  coveredFrom: Date | null;
+  historyComplete: boolean;
+  historyState: HistoryState;
+  historyError?: string | null;
+}
+
+/**
+ * How far back one repository's data reaches, and what an outstanding history request is doing
+ * with it (spec: "History sync progress is observable"). A rate limit pause is worded as a pause,
+ * not as a failure: it resumes on its own and nothing is lost.
+ */
+export function CoverageState({ coverage }: { coverage: CoverageDisplay }) {
+  const note = {
+    idle: null,
+    complete: null,
+    running: 'history sync running',
+    paused: 'history sync paused for rate limits — it resumes on its own',
+    failed: `history sync failed${coverage.historyError ? `: ${coverage.historyError}` : ''}`,
+  }[coverage.historyState];
+  return (
+    <>
+      <span>{coverageLabel(coverage.coveredFrom, coverage.historyComplete)}</span>
+      {note ? (
+        <span className={coverage.historyState === 'failed' ? '' : 'muted'}> · {note}</span>
+      ) : null}
+    </>
+  );
+}
+
+export interface HistorySyncProgress {
+  id: string;
+  fullName: string;
+  coveredFrom: Date | null;
+  paused: boolean;
+}
+
+/**
+ * Says that a period reaches back further than the data does, so an empty stretch is not read as
+ * a quiet one (spec: analytics-dashboard "A viewer selects a period reaching before synced
+ * coverage"). Renders nothing when the period sits entirely inside coverage — a covered period
+ * with no pull requests is genuinely empty, and saying otherwise would be a lie in the other
+ * direction.
+ */
+export function CoverageNotice({
+  periodStart,
+  coverageStart,
+  historySyncing = [],
+  historySyncHref,
+}: {
+  periodStart: Date;
+  coverageStart: Date | null;
+  historySyncing?: HistorySyncProgress[];
+  historySyncHref?: string;
+}) {
+  if (coverageStart === null || periodStart >= coverageStart) return null;
+  return (
+    <p className="notice">
+      This period begins before the data does. Pull requests are present from{' '}
+      {formatDay(coverageStart)} onwards; anything earlier is missing rather than absent.{' '}
+      {historySyncing.length > 0 ? (
+        <>A history sync is already extending it.</>
+      ) : historySyncHref ? (
+        <Link href={historySyncHref}>Sync older history</Link>
+      ) : (
+        <>An owner can sync older history from settings.</>
+      )}
+    </p>
+  );
+}
+
 export interface CompletenessProps {
   backfilling: { id: string; fullName: string }[];
   failing: { fullName: string; lastError: string | null; consecutiveFailures: number }[];
   lastSuccessAt: Date | null;
   isOwner: boolean;
+  historySyncing?: HistorySyncProgress[];
 }
 
 /** Says plainly when the data behind a surface is incomplete or stale. */
@@ -123,6 +203,7 @@ export function DataCompleteness({
   failing,
   lastSuccessAt,
   isOwner,
+  historySyncing = [],
 }: CompletenessProps) {
   return (
     <div className="completeness">
@@ -130,6 +211,23 @@ export function DataCompleteness({
         <p className="notice">
           Historical data is still loading for {backfilling.map((r) => r.fullName).join(', ')}.
           Numbers below will change as it arrives.
+        </p>
+      ) : null}
+      {historySyncing.length > 0 ? (
+        // Older data is still arriving, but everything already inside coverage is complete — so
+        // this states what is happening without suppressing the metrics (spec: "A history sync is
+        // running").
+        <p className="notice">
+          Older pull requests are still being added for{' '}
+          {historySyncing
+            .map(
+              (repository) =>
+                `${repository.fullName} (${
+                  repository.paused ? 'paused for rate limits, ' : ''
+                }reaching back to ${formatDay(repository.coveredFrom)})`,
+            )
+            .join(', ')}
+          . Metrics for periods already covered are unaffected.
         </p>
       ) : null}
       {failing.length > 0 ? (

@@ -18,7 +18,7 @@ interface RawRow {
 }
 
 export function mapRawPayload(source: IngestSource, payload: unknown): NormalizedPullRequest {
-  if (source === 'graphql_backfill') {
+  if (source === 'graphql_backfill' || source === 'graphql_history') {
     return mapGraphQLPullRequest(payload as GraphQLPullRequestNode);
   }
   return mapRestPullRequest(payload as RestPullRequestBundle);

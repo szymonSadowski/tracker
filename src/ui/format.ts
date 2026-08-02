@@ -35,6 +35,35 @@ export function formatDate(value: Date | null | undefined): string {
   });
 }
 
+/**
+ * A coverage boundary as a day.
+ *
+ * Fixed to UTC, unlike `formatDate`: the boundary is a claim about what data exists, and rendering
+ * it in the viewer's zone shifts it a day either way — westward, into claiming a day of coverage
+ * that was never fetched. Same date for every viewer, matching the stored value.
+ */
+export function formatDay(value: Date | null | undefined): string {
+  if (!value) return UNAVAILABLE;
+  return value.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/**
+ * How far back a repository's pull request data reaches.
+ *
+ * Coverage is a floor — everything created from this point onwards is present, and older rows may
+ * exist too — so the wording is "from X onwards" and never "only from X" (design.md R4).
+ */
+export function coverageLabel(coveredFrom: Date | null, historyComplete: boolean): string {
+  if (historyComplete) return 'all history';
+  if (!coveredFrom) return 'not recorded yet';
+  return `from ${formatDay(coveredFrom)}`;
+}
+
 export function relativeTime(value: Date | null | undefined, now: Date = new Date()): string {
   if (!value) return 'never';
   const seconds = Math.round((now.getTime() - value.getTime()) / 1000);

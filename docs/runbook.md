@@ -36,8 +36,10 @@ VALUES (:workspace, 'repository.incremental_sync',
 ON CONFLICT DO NOTHING;
 ```
 
-Members can do the same from the product: `POST /api/workspaces/<id>/sync`, debounced per
-workspace by `ON_DEMAND_SYNC_DEBOUNCE_SECONDS`.
+Members can do the same from the product: the **Sync now** button in settings, which posts to
+`POST /api/workspaces/<id>/sync`, debounced per workspace by `ON_DEMAND_SYNC_DEBOUNCE_SECONDS`. A
+request inside that interval is reported back as such rather than silently dropped, along with any
+repositories skipped because their backfill has not finished.
 
 ## Restart a backfill that stalled
 
@@ -54,6 +56,55 @@ ON CONFLICT DO NOTHING;
 To re-run a repository's history **from the beginning**, clear the cursor first
 (`UPDATE repositories SET backfill_cursor = NULL, backfill_window_start = NULL WHERE id = …`).
 Re-ingesting the same pull requests changes nothing that has not genuinely changed on GitHub.
+
+## Deepen a repository's history
+
+Connecting a repository ingests `BACKFILL_WINDOW_DAYS` (90 by default) of history. Older pull
+requests are only fetched when someone asks: the **History** control in settings, or
+
+```
+POST /api/workspaces/<id>/history-sync   {"from": "2024-01-01"}   # or {"from": null} for all
+```
+
+One `repository.history_sync` job is enqueued per in-scope repository. Each walks the repository's
+pull requests by creation date, newest first, recording `repositories.history_cursor` and
+`history_covered_from` after every page — so it is safe to interrupt, and resumes where it stopped.
+
+```sql
+-- How far back each repository reaches, and what it is doing about it
+SELECT full_name, history_state, history_covered_from, history_complete, history_requested_from,
+       left(history_error, 120) AS history_error
+  FROM repositories WHERE workspace_id = :workspace ORDER BY full_name;
+```
+
+`history_state` is `idle`, `running`, `paused` (rate limits — it resumes on its own),
+`complete`, or `failed`. `history_complete` means the walk reached the repository's first pull
+request, after which further requests do no work.
+
+**What it costs.** Each page is 25 pull requests with up to 100 reviews and 100 commits inline, so
+a full-history request on a large organisation is a substantial amount of API quota — plausibly
+hours for an active repository and days for an org with years of history. It is deliberately the
+lowest-priority work in the queue (priority 100, against 50 for backfill and 10 for incremental
+sync), so incremental sync is always dispatched first and current data never goes stale waiting on
+old data. Below `RATE_LIMIT_SAFETY_THRESHOLD` it pauses and resumes after the reset rather than
+exhausting the quota. Progress stays visible in settings throughout.
+
+The walk starts from the newest pull request, so its first pages re-read what the initial backfill
+already holds; those rows are recognised as covered and are not rewritten. A repository that
+already walked to a given date resumes from its stored cursor, so asking for an earlier date
+extends coverage rather than starting over.
+
+To restart a repository's history walk from scratch (rarely needed — only if the cursor is
+believed corrupt):
+
+```sql
+UPDATE repositories
+   SET history_cursor = NULL, history_state = 'idle', history_error = NULL
+ WHERE id = :repository;
+```
+
+Leave `history_covered_from` alone unless the data behind it was deleted: it is the claim the
+surfaces make about how far back the numbers can be trusted.
 
 ## Recompute analysis
 
@@ -102,6 +153,18 @@ The workers pause below `RATE_LIMIT_SAFETY_THRESHOLD` remaining points and retry
 paused runs are recorded as `sync_runs.status = 'paused'` with their cursor. Nothing is lost. If
 pauses are constant, either raise the poll interval (`SYNC_INTERVAL_MINUTES`) or reduce the
 backfill window (`BACKFILL_WINDOW_DAYS`).
+
+A history sync makes pauses more likely by design, and shows them as "paused for rate limits"
+rather than as a failure. If one must be stopped outright, cancel its jobs:
+
+```sql
+UPDATE jobs SET state = 'cancelled', finished_at = now()
+ WHERE workspace_id = :workspace AND type = 'repository.history_sync' AND state = 'pending';
+UPDATE repositories SET history_state = 'idle' WHERE workspace_id = :workspace
+   AND history_state = 'running';
+```
+
+Coverage already reached is kept; nothing is re-fetched when it is asked for again.
 
 ## Stuck or lost jobs
 

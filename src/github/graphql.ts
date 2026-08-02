@@ -76,14 +76,11 @@ export interface PullRequestPage {
   rateLimit: { remaining: number; resetAt: string } | undefined;
 }
 
-/** The one query backfill uses. Page sizes are deliberately modest: cost scales with nesting. */
-export const PULL_REQUESTS_QUERY = `
-query PullRequests($owner: String!, $name: String!, $first: Int!, $after: String) {
-  rateLimit { remaining resetAt cost }
-  repository(owner: $owner, name: $name) {
-    pullRequests(first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
+/**
+ * The node selection both paged queries share, so the two paths normalize identically and a
+ * change to what is fetched cannot drift between them.
+ */
+const PULL_REQUEST_NODE_SELECTION = `
         id number title url isDraft createdAt updatedAt closedAt mergedAt
         additions deletions changedFiles baseRefName headRefName
         author {
@@ -134,11 +131,31 @@ query PullRequests($owner: String!, $name: String!, $first: Int!, $after: String
             ... on ClosedEvent { createdAt actor { login __typename ... on User { id } } }
             ... on ReopenedEvent { createdAt actor { login __typename ... on User { id } } }
           }
-        }
+        }`;
+
+function pagedQuery(operation: string, orderByField: 'UPDATED_AT' | 'CREATED_AT'): string {
+  return `
+query ${operation}($owner: String!, $name: String!, $first: Int!, $after: String) {
+  rateLimit { remaining resetAt cost }
+  repository(owner: $owner, name: $name) {
+    pullRequests(first: $first, after: $after, orderBy: {field: ${orderByField}, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {${PULL_REQUEST_NODE_SELECTION}
       }
     }
   }
 }`;
+}
+
+/** The one query backfill uses. Page sizes are deliberately modest: cost scales with nesting. */
+export const PULL_REQUESTS_QUERY = pagedQuery('PullRequests', 'UPDATED_AT');
+
+/**
+ * The history walk's query (design.md D2). `created_at` is immutable, so the ordering is stable
+ * across pages and a resumed cursor cannot skip a pull request that shifted position mid-walk —
+ * which `UPDATED_AT` cannot promise over a walk of thousands of pages.
+ */
+export const PULL_REQUESTS_BY_CREATION_QUERY = pagedQuery('PullRequestsByCreation', 'CREATED_AT');
 
 interface GraphQLEnvelope<T> {
   data?: T;
@@ -179,6 +196,23 @@ export class GitHubGraphQLClient {
     pageSize: number;
     after?: string | null;
   }): Promise<PullRequestPage> {
+    return this.fetchPage(PULL_REQUESTS_QUERY, input);
+  }
+
+  /** The same page shape, ordered by creation date, for the history walk (design.md D2). */
+  async fetchPullRequestPageByCreation(input: {
+    owner: string;
+    name: string;
+    pageSize: number;
+    after?: string | null;
+  }): Promise<PullRequestPage> {
+    return this.fetchPage(PULL_REQUESTS_BY_CREATION_QUERY, input);
+  }
+
+  private async fetchPage(
+    query: string,
+    input: { owner: string; name: string; pageSize: number; after?: string | null },
+  ): Promise<PullRequestPage> {
     const data = await this.query<{
       rateLimit?: { remaining: number; resetAt: string };
       repository: {
@@ -187,7 +221,7 @@ export class GitHubGraphQLClient {
           nodes: GraphQLPullRequestNode[];
         };
       } | null;
-    }>(PULL_REQUESTS_QUERY, {
+    }>(query, {
       owner: input.owner,
       name: input.name,
       first: input.pageSize,

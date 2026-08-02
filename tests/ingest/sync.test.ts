@@ -310,10 +310,58 @@ describe('incremental sync', () => {
     await seedRepository(db(), workspace.id, { backfillState: 'complete' });
 
     const first = await requestOnDemandSync(db(), workspace.id, 120);
-    expect(first).toEqual({ enqueued: 1, debounced: false });
+    expect(first).toEqual({ enqueued: 1, debounced: false, backfilling: [] });
 
     const second = await requestOnDemandSync(db(), workspace.id, 120);
-    expect(second).toEqual({ enqueued: 0, debounced: true });
+    expect(second).toEqual({ enqueued: 0, debounced: true, backfilling: [] });
     expect(await countJobs(db(), { workspaceId: workspace.id, state: 'pending' })).toBe(1);
+  });
+
+  it('syncs one repository when asked for one, leaving the rest alone', async () => {
+    const workspace = await seedWorkspace(db());
+    const target = await seedRepository(db(), workspace.id, { name: 'target' });
+    await seedRepository(db(), workspace.id, { name: 'other' });
+
+    const outcome = await requestOnDemandSync(db(), workspace.id, 120, {
+      repositoryId: target.id,
+    });
+
+    expect(outcome).toMatchObject({ enqueued: 1, debounced: false });
+    const jobs = await db().query<{ payload: unknown }>('SELECT payload FROM jobs');
+    expect(jobs.rows).toHaveLength(1);
+    const payload = jobs.rows[0]!.payload as { repositoryId: string };
+    expect(payload.repositoryId).toBe(target.id);
+  });
+
+  it('debounces per target, so one repository’s request does not silence another’s', async () => {
+    const workspace = await seedWorkspace(db());
+    const first = await seedRepository(db(), workspace.id, { name: 'first' });
+    const second = await seedRepository(db(), workspace.id, { name: 'second' });
+
+    expect(
+      await requestOnDemandSync(db(), workspace.id, 120, { repositoryId: first.id }),
+    ).toMatchObject({ enqueued: 1, debounced: false });
+    // A different repository is a different request, not a repeat of the first.
+    expect(
+      await requestOnDemandSync(db(), workspace.id, 120, { repositoryId: second.id }),
+    ).toMatchObject({ enqueued: 1, debounced: false });
+    // The same one again inside the window is a repeat.
+    expect(
+      await requestOnDemandSync(db(), workspace.id, 120, { repositoryId: first.id }),
+    ).toMatchObject({ enqueued: 0, debounced: true });
+  });
+
+  it('names the repositories a sync skipped because their history is still loading', async () => {
+    const workspace = await seedWorkspace(db());
+    await seedRepository(db(), workspace.id, { name: 'ready', backfillState: 'complete' });
+    const loading = await seedRepository(db(), workspace.id, {
+      name: 'loading',
+      backfillState: 'in_progress',
+    });
+
+    const outcome = await requestOnDemandSync(db(), workspace.id, 120);
+
+    expect(outcome.enqueued).toBe(1);
+    expect(outcome.backfilling).toEqual([{ id: loading.id, fullName: loading.fullName }]);
   });
 });

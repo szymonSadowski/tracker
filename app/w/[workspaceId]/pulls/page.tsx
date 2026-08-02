@@ -4,7 +4,9 @@ import { workspaceScope } from '@/db/scope';
 import { loadWorkspacePage } from '@/ui/page-access';
 import { listPullRequests, periodOfDays, type MetricScope } from '@/analysis/aggregate';
 import { listTeams, listRoster } from '@/teams/store';
-import { PeriodSelector } from '@/ui/components';
+import { syncStatus } from '@/repositories/store';
+import { CoverageNotice, PeriodSelector } from '@/ui/components';
+import { SyncRepositoryButton } from './sync-repository';
 import {
   formatDate,
   formatDuration,
@@ -37,6 +39,7 @@ export default async function PullRequestsPage({
 
   const days = parsePeriodDays(query.period);
   const period = periodOfDays(days);
+  const status = await syncStatus(db(), workspaceId);
   const teams = await listTeams(scope);
   const roster = await listRoster(scope);
 
@@ -44,6 +47,9 @@ export default async function PullRequestsPage({
   const repositoryIds = query.repository
     ? access.visibleRepositoryIds.filter((id) => id === query.repository)
     : access.visibleRepositoryIds;
+  // Undefined unless exactly one visible repository is selected — which is when syncing just that
+  // one is a meaningful thing to offer.
+  const selectedRepository = access.visibleRepositories.find((r) => r.id === query.repository);
 
   const state = query.state === 'open' || query.state === 'closed' ? query.state : 'merged';
   const filter: MetricScope = {
@@ -84,6 +90,12 @@ export default async function PullRequestsPage({
       </p>
 
       <PeriodSelector days={days} options={PERIOD_OPTIONS} basePath={`/w/${workspaceId}/pulls`} />
+      <CoverageNotice
+        periodStart={period.start}
+        coverageStart={status.coverageStart}
+        historySyncing={status.historySyncing}
+        historySyncHref={access.role === 'owner' ? `/w/${workspaceId}/settings` : undefined}
+      />
 
       <div className="period">
         <span className="muted">State:</span>
@@ -115,6 +127,13 @@ export default async function PullRequestsPage({
             {repository.name}
           </Link>
         ))}
+        {selectedRepository ? (
+          <SyncRepositoryButton
+            workspaceId={workspaceId}
+            repositoryId={selectedRepository.id}
+            repositoryName={selectedRepository.name}
+          />
+        ) : null}
       </div>
 
       <div className="period">
