@@ -12,21 +12,41 @@ GitHub → *Settings* → *Developer settings* → *GitHub Apps* → **New GitHu
 | GitHub App name | `Tracker` (any unique name; note the slug it produces) |
 | Homepage URL | `https://<your-host>` |
 | Callback URL | `https://<your-host>/api/auth/github/callback` |
-| Request user authorization (OAuth) during installation | **enabled** |
+| Expire user authorization tokens | **disabled** — see below |
+| Request user authorization (OAuth) during installation | **disabled** — see below |
 | Setup URL | `https://<your-host>/api/github/setup` |
 | Redirect on update | **enabled** — so repository-selection changes come back to us |
 | Webhook | **inactive** for this release (see design.md D3) |
+
+Two of those are easy to get wrong, and GitHub's form does not explain either:
+
+- **OAuth during installation must stay off**, because GitHub disables the Setup URL field when it
+  is on ("Unavailable when requesting OAuth during installation") and sends the installation back
+  to the Callback URL instead. This release keeps the two callbacks separate: sign-in at
+  `/api/auth/github/callback`, installation at `/api/github/setup`. With the box off, an
+  installation lands on the setup route, which bounces an unauthenticated installer through
+  sign-in and back — one extra redirect, same result.
+- **Expiring user authorization tokens must stay off** until refresh handling exists. The user's
+  OAuth token is stored on the session and used for repository permission checks; with expiry on,
+  GitHub issues an 8-hour token plus a `refresh_token`, and nothing here redeems that refresh
+  token yet.
 
 ### Repository permissions
 
 | Permission | Access | Why |
 | --- | --- | --- |
-| Contents | Read-only | commit metadata on a pull request |
-| Metadata | Read-only | mandatory; repository identity, names, visibility |
-| Pull requests | Read-only | pull requests, reviews, review comments, timeline events |
+| Metadata | Read-only | mandatory; `/installation/repositories` and the per-user `/repos/{owner}/{repo}` visibility check |
+| Pull requests | Read-only | `/pulls`, `/pulls/{n}`, `/pulls/{n}/reviews`, and the GraphQL backfill query |
+| Contents | Read-only | `/pulls/{n}/commits` and GraphQL commit objects — metadata and diff statistics only |
+| Issues | Read-only | `/issues/{n}/timeline`, which supplies ready-for-review, draft conversions, and force pushes to the REST sync path |
 
-No organization permissions and no account permissions are needed. The App reads no file
-contents — only diff statistics (design.md non-goals).
+No organization permissions, no account permissions, and no write access anywhere. The App reads
+no file contents — only diff statistics (design.md non-goals).
+
+The Issues permission is the surprising one: GitHub files the timeline endpoint under Issues even
+when the issue in question is a pull request. If a permission is missing, GitHub answers 403,
+which the worker reads as rejected credentials and marks the installation **needs attention** —
+so check `installations.status_reason` before assuming the App key is wrong.
 
 Users authorize with the `read:user` scope during sign-in so we can identify them; repository
 visibility is then resolved against GitHub per repository.
