@@ -12,6 +12,7 @@ import {
 } from '../../src/jobs/queue';
 import { Worker } from '../../src/jobs/worker';
 import { PermanentError, RetryableError } from '../../src/jobs/errors';
+import { HISTORY_JOB_PRIORITY } from '../../src/ingest/history';
 import { registerScheduledTasks, runDueScheduledTasks } from '../../src/jobs/scheduler';
 import type { ScheduledTaskDefinition } from '../../src/jobs/scheduler';
 
@@ -236,6 +237,52 @@ describe('job queue', () => {
     const cancelled = await cancelPendingJobs(db(), workspaceId, 'installation removed');
     expect(cancelled).toBe(1);
     expect(await claimNextJob(db(), 'worker')).toBeUndefined();
+  });
+});
+
+/**
+ * History work is deliberately the lowest-priority thing in the queue: ingesting old data must
+ * never starve keeping current data fresh (design.md D5, spec: "History sync competes with
+ * incremental sync for quota").
+ */
+describe('history sync jobs', () => {
+  it('enqueues a single job however often one repository is requested', async () => {
+    const workspaceId = await workspace();
+    const options = {
+      workspaceId,
+      type: 'repository.history_sync',
+      payload: { repositoryId: 'repo-1', from: null },
+      dedupeKey: 'history:repo-1',
+      priority: HISTORY_JOB_PRIORITY,
+    } as const;
+
+    expect(await enqueue(db(), options)).toBeDefined();
+    expect(await enqueue(db(), options)).toBeUndefined();
+    expect(
+      await countJobs(db(), { workspaceId, type: 'repository.history_sync', state: 'pending' }),
+    ).toBe(1);
+  });
+
+  it('is dispatched only after pending incremental sync work', async () => {
+    const workspaceId = await workspace();
+    // Queued first, so ordering here can only come from priority.
+    await enqueue(db(), {
+      workspaceId,
+      type: 'repository.history_sync',
+      payload: { repositoryId: 'repo-1', from: null },
+      dedupeKey: 'history:repo-1',
+      priority: HISTORY_JOB_PRIORITY,
+    });
+    await enqueue(db(), {
+      workspaceId,
+      type: 'repository.incremental_sync',
+      payload: { repositoryId: 'repo-1', reason: 'on_demand' },
+      dedupeKey: 'sync:repo-1',
+      priority: 10,
+    });
+
+    expect((await claimNextJob(db(), 'worker'))?.type).toBe('repository.incremental_sync');
+    expect((await claimNextJob(db(), 'worker'))?.type).toBe('repository.history_sync');
   });
 });
 

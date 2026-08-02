@@ -4,7 +4,8 @@ Pull request throughput and latency for engineering teams, read from GitHub.
 
 Install a GitHub App on selected repositories; the product backfills their recent history, keeps
 it current on a poll, derives a deterministic per-pull-request analysis record, and presents team
-aggregates and personal views over it. No LLM, no editor plugin — those are later layers that add
+aggregates and personal views over it. Older history is fetched on request — settings carries a
+history sync that deepens coverage backwards, and a sync-now button for immediate refresh. No LLM, no editor plugin — those are later layers that add
 to the same seams (see `openspec/changes/github-pr-analytics-v1/`).
 
 ## Quick start
@@ -35,8 +36,10 @@ GitHub ──REST poll─────────┘        │                 
 - **Three storage layers.** Raw payloads are retained, so normalized data can be rebuilt without
   calling GitHub, and the derived layer can be recomputed from stored data when a metric
   definition changes.
-- **One write path.** Backfill and incremental sync both go through the same normalizer, keyed by
-  GitHub node id, so replaying an overlapping window is a no-op.
+- **One write path.** Backfill, history sync, and incremental sync all go through the same
+  normalizer, keyed by GitHub node id, so replaying an overlapping window is a no-op.
+- **Coverage is recorded, not assumed.** Each repository stores how far back its data reaches, so
+  a surface can tell "no pull requests in that period" from "never synced that far back".
 - **A database-backed queue.** Analysis is enqueued in the same transaction as the data that
   justifies it, so no job can be lost between a commit and an enqueue.
 - **Multi-tenant from the first migration.** Every workspace-scoped table carries `workspace_id`,

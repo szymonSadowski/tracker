@@ -2,6 +2,7 @@
 
 export const JOB_TYPES = [
   'repository.backfill',
+  'repository.history_sync',
   'repository.incremental_sync',
   'repository.reprocess',
   'workspace.schedule_syncs',
@@ -14,6 +15,8 @@ export type JobType = (typeof JOB_TYPES)[number];
 
 export interface JobPayloads {
   'repository.backfill': { repositoryId: string; windowStart?: string };
+  /** `from: null` means all available history (design.md D4). */
+  'repository.history_sync': { repositoryId: string; from: string | null };
   'repository.incremental_sync': { repositoryId: string; reason?: 'schedule' | 'on_demand' };
   'repository.reprocess': { repositoryId: string };
   'workspace.schedule_syncs': Record<string, never>;

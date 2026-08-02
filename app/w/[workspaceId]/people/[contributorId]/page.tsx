@@ -9,7 +9,8 @@ import {
   teamMetrics,
   type MetricScope,
 } from '@/analysis/aggregate';
-import { Card, MetricCard, PeriodSelector, Section } from '@/ui/components';
+import { syncStatus } from '@/repositories/store';
+import { Card, CoverageNotice, MetricCard, PeriodSelector, Section } from '@/ui/components';
 import {
   formatCount,
   formatDate,
@@ -56,6 +57,7 @@ export default async function ContributorPage({
   };
   const metrics = await teamMetrics(scope, filter);
   const pullRequests = await listPullRequests(scope, filter, { limit: 50 });
+  const status = await syncStatus(db(), workspaceId);
 
   return (
     <main>
@@ -64,6 +66,12 @@ export default async function ContributorPage({
         days={days}
         options={PERIOD_OPTIONS}
         basePath={`/w/${workspaceId}/people/${contributorId}`}
+      />
+      <CoverageNotice
+        periodStart={filter.period.start}
+        coverageStart={status.coverageStart}
+        historySyncing={status.historySyncing}
+        historySyncHref={access.role === 'owner' ? `/w/${workspaceId}/settings` : undefined}
       />
 
       <div className="cards">

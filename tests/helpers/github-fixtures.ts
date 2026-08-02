@@ -18,6 +18,8 @@ export interface FixtureOptions {
   number?: number;
   mergedAtHours?: number | null;
   updatedAtHours?: number;
+  /** Creation time relative to T0. Negative values are older, which the history walk orders by. */
+  createdAtHours?: number;
   draft?: boolean;
   authorIsBot?: boolean;
 }
@@ -43,7 +45,7 @@ export function graphqlPullRequest(options: FixtureOptions = {}): GraphQLPullReq
     title: 'Add rate limiting',
     url: 'https://github.com/acme/api/pull/7',
     isDraft: options.draft ?? false,
-    createdAt: iso(0),
+    createdAt: iso(options.createdAtHours ?? 0),
     updatedAt: iso(options.updatedAtHours ?? merged ?? 8),
     closedAt: merged === null ? null : iso(merged),
     mergedAt: merged === null ? null : iso(merged),

@@ -4,8 +4,10 @@ import { loadWorkspacePage } from '@/ui/page-access';
 import { installationForWorkspace } from '@/installations/service';
 import { listRepositories, syncStatus } from '@/repositories/store';
 import { listMembers } from '@/workspaces/store';
-import { DataCompleteness, Section } from '@/ui/components';
+import { CoverageState, DataCompleteness, Section } from '@/ui/components';
 import { formatDate, relativeTime } from '@/ui/format';
+import { HistorySyncControl } from './history-sync';
+import { SyncNowButton } from './sync-now';
 
 /** Installation settings: repository scope, connection health, and sync state. Owner only. */
 export default async function SettingsPage({
@@ -56,6 +58,18 @@ export default async function SettingsPage({
         )}
       </Section>
 
+      <Section title="Sync">
+        <p className="muted">
+          Connecting a repository ingests its recent history; older pull requests are only fetched
+          when asked for here.
+        </p>
+        <SyncNowButton workspaceId={workspaceId} />
+      </Section>
+
+      <Section title="History">
+        <HistorySyncControl workspaceId={workspaceId} />
+      </Section>
+
       <Section title="Repositories">
         <DataCompleteness {...status} isOwner />
         <table>
@@ -64,6 +78,7 @@ export default async function SettingsPage({
               <th>Repository</th>
               <th>In scope</th>
               <th>Backfill</th>
+              <th>Data from</th>
               <th>Last successful sync</th>
               <th>Last error</th>
             </tr>
@@ -74,6 +89,16 @@ export default async function SettingsPage({
                 <td>{repository.fullName}</td>
                 <td>{repository.inScope ? 'yes' : 'no — data retained'}</td>
                 <td>{repository.backfillState}</td>
+                <td>
+                  <CoverageState
+                    coverage={{
+                      coveredFrom: repository.historyCoveredFrom,
+                      historyComplete: repository.historyComplete,
+                      historyState: repository.historyState,
+                      historyError: repository.historyError,
+                    }}
+                  />
+                </td>
                 <td className="numeric">
                   {repository.lastSuccessAt ? formatDate(repository.lastSuccessAt) : 'never'}
                   {repository.lastSuccessAt ? (

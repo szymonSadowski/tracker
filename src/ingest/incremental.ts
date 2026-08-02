@@ -153,6 +153,16 @@ export async function enqueueWorkspaceSyncs(
   });
 }
 
+export interface OnDemandSyncOutcome {
+  enqueued: number;
+  debounced: boolean;
+  /**
+   * Repositories left to their backfill job. Reported so a zero-enqueued result can be explained
+   * rather than looking like a dead button (spec: "Member triggers a sync during backfill").
+   */
+  backfilling: { id: string; fullName: string }[];
+}
+
 /**
  * On-demand sync (spec: "Members can trigger a sync on demand"). Debounced per workspace: a
  * request inside the debounce window is accepted but enqueues nothing new.
@@ -161,8 +171,13 @@ export async function requestOnDemandSync(
   database: Database,
   workspaceId: string,
   debounceSeconds: number,
-): Promise<{ enqueued: number; debounced: boolean }> {
+): Promise<OnDemandSyncOutcome> {
   return database.transaction(async (tx) => {
+    const repositories = await listRepositories(tx, workspaceId, { inScopeOnly: true });
+    const backfilling = repositories
+      .filter((repository) => repository.backfillState !== 'complete')
+      .map((repository) => ({ id: repository.id, fullName: repository.fullName }));
+
     const { rows } = await tx.query<{ recent: boolean }>(
       `SELECT EXISTS (
          SELECT 1 FROM jobs
@@ -173,9 +188,8 @@ export async function requestOnDemandSync(
        ) AS recent`,
       [workspaceId, debounceSeconds],
     );
-    if (rows[0]!.recent) return { enqueued: 0, debounced: true };
+    if (rows[0]!.recent) return { enqueued: 0, debounced: true, backfilling };
 
-    const repositories = await listRepositories(tx, workspaceId, { inScopeOnly: true });
     let enqueued = 0;
     for (const repository of repositories) {
       if (repository.backfillState !== 'complete') continue;
@@ -188,6 +202,6 @@ export async function requestOnDemandSync(
       });
       if (job) enqueued++;
     }
-    return { enqueued, debounced: false };
+    return { enqueued, debounced: false, backfilling };
   });
 }

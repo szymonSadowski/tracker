@@ -310,10 +310,24 @@ describe('incremental sync', () => {
     await seedRepository(db(), workspace.id, { backfillState: 'complete' });
 
     const first = await requestOnDemandSync(db(), workspace.id, 120);
-    expect(first).toEqual({ enqueued: 1, debounced: false });
+    expect(first).toEqual({ enqueued: 1, debounced: false, backfilling: [] });
 
     const second = await requestOnDemandSync(db(), workspace.id, 120);
-    expect(second).toEqual({ enqueued: 0, debounced: true });
+    expect(second).toEqual({ enqueued: 0, debounced: true, backfilling: [] });
     expect(await countJobs(db(), { workspaceId: workspace.id, state: 'pending' })).toBe(1);
+  });
+
+  it('names the repositories a sync skipped because their history is still loading', async () => {
+    const workspace = await seedWorkspace(db());
+    await seedRepository(db(), workspace.id, { name: 'ready', backfillState: 'complete' });
+    const loading = await seedRepository(db(), workspace.id, {
+      name: 'loading',
+      backfillState: 'in_progress',
+    });
+
+    const outcome = await requestOnDemandSync(db(), workspace.id, 120);
+
+    expect(outcome.enqueued).toBe(1);
+    expect(outcome.backfilling).toEqual([{ id: loading.id, fullName: loading.fullName }]);
   });
 });

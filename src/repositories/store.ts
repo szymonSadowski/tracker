@@ -3,6 +3,9 @@ import type { Queryable } from '../db/driver';
 
 export type BackfillState = 'pending' | 'in_progress' | 'complete' | 'failed';
 
+/** State of a member-requested history sync for one repository (design.md D3). */
+export type HistoryState = 'idle' | 'running' | 'paused' | 'complete' | 'failed';
+
 export interface RepositoryRecord {
   id: string;
   workspaceId: string;
@@ -23,6 +26,14 @@ export interface RepositoryRecord {
   lastError: string | null;
   consecutiveFailures: number;
   syncedThrough: Date | null;
+  /** Earliest creation time from which pull request data is known complete — a floor (D3, R4). */
+  historyCoveredFrom: Date | null;
+  /** True once the walk reached the repository's earliest pull request. */
+  historyComplete: boolean;
+  historyCursor: string | null;
+  historyRequestedFrom: Date | null;
+  historyState: HistoryState;
+  historyError: string | null;
 }
 
 interface RepositoryRow {
@@ -45,6 +56,12 @@ interface RepositoryRow {
   last_error: string | null;
   consecutive_failures: number;
   synced_through: Date | null;
+  history_covered_from: Date | null;
+  history_complete: boolean;
+  history_cursor: string | null;
+  history_requested_from: Date | null;
+  history_state: HistoryState;
+  history_error: string | null;
 }
 
 export function toRepository(row: RepositoryRow): RepositoryRecord {
@@ -68,6 +85,12 @@ export function toRepository(row: RepositoryRow): RepositoryRecord {
     lastError: row.last_error,
     consecutiveFailures: row.consecutive_failures,
     syncedThrough: row.synced_through,
+    historyCoveredFrom: row.history_covered_from,
+    historyComplete: row.history_complete,
+    historyCursor: row.history_cursor,
+    historyRequestedFrom: row.history_requested_from,
+    historyState: row.history_state,
+    historyError: row.history_error,
   };
 }
 
@@ -203,10 +226,17 @@ export async function recordBackfillProgress(
   ]);
 }
 
+/**
+ * A finished backfill has ingested everything updated inside its window, and a pull request
+ * created after the window opened must have been updated since — so the window start is also a
+ * true coverage floor, and recording it is what lets a surface describe a new repository's depth
+ * (design.md D3, R4). The migration seeds the same value for repositories backfilled earlier.
+ */
 export async function markBackfillComplete(db: Queryable, repositoryId: string): Promise<void> {
   await db.query(
     `UPDATE repositories
         SET backfill_state = 'complete', backfill_completed_at = now(), backfill_cursor = NULL,
+            history_covered_from = LEAST(history_covered_from, backfill_window_start),
             updated_at = now()
       WHERE id = $1`,
     [repositoryId],
@@ -253,13 +283,98 @@ export async function markBackfillFailed(
   );
 }
 
+/**
+ * History sync bookkeeping (design.md D3). Coverage advances only when a page completes, so an
+ * interrupted pass never claims coverage it does not have.
+ */
+export async function markHistorySyncStarted(
+  db: Queryable,
+  repositoryId: string,
+  requestedFrom: Date | null,
+): Promise<void> {
+  await db.query(
+    `UPDATE repositories
+        SET history_state = 'running', history_requested_from = $2, history_error = NULL,
+            updated_at = now()
+      WHERE id = $1`,
+    [repositoryId, requestedFrom],
+  );
+}
+
+/**
+ * Cursor and coverage move together: the cursor is only meaningful alongside the point it proves
+ * is covered. Coverage never moves later — `LEAST` ignores a NULL column, so the first page of a
+ * repository with no recorded coverage sets it.
+ */
+export async function recordHistoryProgress(
+  db: Queryable,
+  repositoryId: string,
+  cursor: string | null,
+  coveredFrom: Date | null,
+): Promise<void> {
+  await db.query(
+    `UPDATE repositories
+        SET history_cursor = $2,
+            history_covered_from = LEAST(history_covered_from, $3::timestamptz),
+            updated_at = now()
+      WHERE id = $1`,
+    [repositoryId, cursor, coveredFrom],
+  );
+}
+
+/**
+ * The requested range is fully ingested. `reachedEnd` distinguishes "walked back to the
+ * repository's first pull request" — after which no later request can find more — from "stopped
+ * at the date that was asked for", which keeps its cursor so a deeper request resumes there
+ * rather than re-walking (spec: "a subsequent request for an earlier date extends coverage").
+ */
+export async function markHistoryComplete(
+  db: Queryable,
+  repositoryId: string,
+  options: { reachedEnd: boolean; coveredFrom?: Date | null } = { reachedEnd: false },
+): Promise<void> {
+  await db.query(
+    `UPDATE repositories
+        SET history_state = 'complete',
+            history_complete = history_complete OR $2,
+            history_cursor = CASE WHEN $2 THEN NULL ELSE history_cursor END,
+            history_covered_from = LEAST(history_covered_from, $3::timestamptz),
+            history_requested_from = NULL,
+            history_error = NULL,
+            updated_at = now()
+      WHERE id = $1`,
+    [repositoryId, options.reachedEnd, options.coveredFrom ?? null],
+  );
+}
+
+/** Paused for rate limits: distinct from failure, and resumes without member action (D5). */
+export async function markHistoryPaused(db: Queryable, repositoryId: string): Promise<void> {
+  await db.query(
+    `UPDATE repositories SET history_state = 'paused', updated_at = now() WHERE id = $1`,
+    [repositoryId],
+  );
+}
+
+export async function markHistoryFailed(
+  db: Queryable,
+  repositoryId: string,
+  error: string,
+): Promise<void> {
+  await db.query(
+    `UPDATE repositories
+        SET history_state = 'failed', history_error = $2, updated_at = now()
+      WHERE id = $1`,
+    [repositoryId, error.slice(0, 2000)],
+  );
+}
+
 /** One row per sync attempt, so "when did this last work, and why did it stop" is queryable. */
 export async function startSyncRun(
   db: Queryable,
   input: {
     workspaceId: string;
     repositoryId: string;
-    kind: 'backfill' | 'incremental' | 'reprocess';
+    kind: 'backfill' | 'incremental' | 'reprocess' | 'history';
     windowStart?: Date | null;
     windowEnd?: Date | null;
   },
@@ -303,6 +418,16 @@ export async function finishSyncRun(
   );
 }
 
+export interface RepositoryCoverage {
+  id: string;
+  fullName: string;
+  coveredFrom: Date | null;
+  historyComplete: boolean;
+  historyState: HistoryState;
+  historyRequestedFrom: Date | null;
+  historyError: string | null;
+}
+
 export interface SyncStatusSummary {
   repositoriesInScope: number;
   backfilling: { id: string; fullName: string }[];
@@ -313,6 +438,17 @@ export interface SyncStatusSummary {
     consecutiveFailures: number;
   }[];
   lastSuccessAt: Date | null;
+  /** Per-repository coverage depth and history state (spec: "History sync progress is observable"). */
+  coverage: RepositoryCoverage[];
+  /**
+   * The point from which the *workspace* is completely covered: the latest of the in-scope
+   * repositories' coverage starts, since a period is only fully covered when every repository
+   * covers it. Repositories that reached their first pull request bound nothing and are excluded.
+   * Null means no repository has recorded coverage yet.
+   */
+  coverageStart: Date | null;
+  /** Repositories whose history sync is still running or paused. */
+  historySyncing: { id: string; fullName: string; coveredFrom: Date | null; paused: boolean }[];
 }
 
 /** What the read surfaces need to be honest about completeness (spec: analytics-dashboard). */
@@ -320,6 +456,11 @@ export async function syncStatus(db: Queryable, workspaceId: string): Promise<Sy
   const repositories = await listRepositories(db, workspaceId, { inScopeOnly: true });
   const lastSuccesses = repositories
     .map((repository) => repository.lastSuccessAt)
+    .filter((value): value is Date => value !== null)
+    .sort((a, b) => b.getTime() - a.getTime());
+  const bounds = repositories
+    .filter((repository) => !repository.historyComplete)
+    .map((repository) => repository.historyCoveredFrom)
     .filter((value): value is Date => value !== null)
     .sort((a, b) => b.getTime() - a.getTime());
   return {
@@ -336,5 +477,26 @@ export async function syncStatus(db: Queryable, workspaceId: string): Promise<Sy
         consecutiveFailures: repository.consecutiveFailures,
       })),
     lastSuccessAt: lastSuccesses[0] ?? null,
+    coverage: repositories.map((repository) => ({
+      id: repository.id,
+      fullName: repository.fullName,
+      coveredFrom: repository.historyCoveredFrom,
+      historyComplete: repository.historyComplete,
+      historyState: repository.historyState,
+      historyRequestedFrom: repository.historyRequestedFrom,
+      historyError: repository.historyError,
+    })),
+    coverageStart: bounds[0] ?? null,
+    historySyncing: repositories
+      .filter(
+        (repository) =>
+          repository.historyState === 'running' || repository.historyState === 'paused',
+      )
+      .map((repository) => ({
+        id: repository.id,
+        fullName: repository.fullName,
+        coveredFrom: repository.historyCoveredFrom,
+        paused: repository.historyState === 'paused',
+      })),
   };
 }

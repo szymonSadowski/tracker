@@ -49,7 +49,12 @@ export interface GitHubAppConfig {
 }
 
 export interface SyncConfig {
-  /** Backfill window in days (design.md: configurable, defaults to 90). */
+  /**
+   * How far back a repository's *automatic* backfill reaches when it enters scope. A starting
+   * point, not a ceiling: a member-requested history sync extends coverage earlier than this, and
+   * changing it does not retroactively change what has already been ingested — coverage depth is
+   * recorded per repository (design.md D3).
+   */
   backfillWindowDays: number;
   /** Incremental sync cadence in minutes (design.md D3). */
   syncIntervalMinutes: number;
@@ -59,6 +64,11 @@ export interface SyncConfig {
   rateLimitSafetyThreshold: number;
   /** Minimum gap between accepted on-demand sync requests for a workspace. */
   onDemandSyncDebounceSeconds: number;
+  /**
+   * Pages one history sync job walks before re-enqueueing itself, so a repository with years of
+   * pull requests cannot monopolise a worker (design.md D1).
+   */
+  historyPagesPerRun: number;
 }
 
 export interface AuthConfig {
@@ -97,6 +107,7 @@ export function loadConfig(): AppConfig {
       syncOverlapMinutes: integer('SYNC_OVERLAP_MINUTES', 30),
       rateLimitSafetyThreshold: integer('RATE_LIMIT_SAFETY_THRESHOLD', 200),
       onDemandSyncDebounceSeconds: integer('ON_DEMAND_SYNC_DEBOUNCE_SECONDS', 120),
+      historyPagesPerRun: integer('HISTORY_PAGES_PER_RUN', 5),
     },
     auth: {
       sessionSecret: required('SESSION_SECRET'),
@@ -121,5 +132,6 @@ export function syncDefaults(): SyncConfig {
     syncOverlapMinutes: integer('SYNC_OVERLAP_MINUTES', 30),
     rateLimitSafetyThreshold: integer('RATE_LIMIT_SAFETY_THRESHOLD', 200),
     onDemandSyncDebounceSeconds: integer('ON_DEMAND_SYNC_DEBOUNCE_SECONDS', 120),
+    historyPagesPerRun: integer('HISTORY_PAGES_PER_RUN', 5),
   };
 }

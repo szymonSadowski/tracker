@@ -10,7 +10,15 @@ import {
   type MetricScope,
 } from '@/analysis/aggregate';
 import { contributorForUser } from '@/auth/users';
-import { Card, ColdStart, MetricCard, PeriodSelector, Section } from '@/ui/components';
+import { syncStatus } from '@/repositories/store';
+import {
+  Card,
+  ColdStart,
+  CoverageNotice,
+  MetricCard,
+  PeriodSelector,
+  Section,
+} from '@/ui/components';
 import {
   formatCount,
   formatDate,
@@ -40,12 +48,20 @@ export default async function PersonalPage({
   const days = parsePeriodDays(periodParam);
   const period = periodOfDays(days);
   const contributor = await contributorForUser(db(), workspaceId, session.user);
+  const status = await syncStatus(db(), workspaceId);
+  const coverage = {
+    periodStart: period.start,
+    coverageStart: status.coverageStart,
+    historySyncing: status.historySyncing,
+    historySyncHref: access.role === 'owner' ? `/w/${workspaceId}/settings` : undefined,
+  };
 
   if (!contributor) {
     return (
       <main>
         <h1>My work</h1>
         <PeriodSelector days={days} options={PERIOD_OPTIONS} basePath={`/w/${workspaceId}/me`} />
+        <CoverageNotice {...coverage} />
         <ColdStart title="No activity recorded for your account yet">
           Nothing in the selected repositories has been authored or reviewed by {session.user.login}{' '}
           within the history we hold. Your work will appear here once it is ingested.
@@ -71,6 +87,7 @@ export default async function PersonalPage({
       <h1>My work</h1>
       <p className="muted">Signed in as {session.user.login}</p>
       <PeriodSelector days={days} options={PERIOD_OPTIONS} basePath={`/w/${workspaceId}/me`} />
+      <CoverageNotice {...coverage} />
 
       <div className="cards">
         <Card

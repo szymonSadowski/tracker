@@ -4,7 +4,8 @@ import { workspaceScope } from '@/db/scope';
 import { loadWorkspacePage } from '@/ui/page-access';
 import { listPullRequests, periodOfDays, type MetricScope } from '@/analysis/aggregate';
 import { listTeams, listRoster } from '@/teams/store';
-import { PeriodSelector } from '@/ui/components';
+import { syncStatus } from '@/repositories/store';
+import { CoverageNotice, PeriodSelector } from '@/ui/components';
 import {
   formatDate,
   formatDuration,
@@ -37,6 +38,7 @@ export default async function PullRequestsPage({
 
   const days = parsePeriodDays(query.period);
   const period = periodOfDays(days);
+  const status = await syncStatus(db(), workspaceId);
   const teams = await listTeams(scope);
   const roster = await listRoster(scope);
 
@@ -84,6 +86,12 @@ export default async function PullRequestsPage({
       </p>
 
       <PeriodSelector days={days} options={PERIOD_OPTIONS} basePath={`/w/${workspaceId}/pulls`} />
+      <CoverageNotice
+        periodStart={period.start}
+        coverageStart={status.coverageStart}
+        historySyncing={status.historySyncing}
+        historySyncHref={access.role === 'owner' ? `/w/${workspaceId}/settings` : undefined}
+      />
 
       <div className="period">
         <span className="muted">State:</span>

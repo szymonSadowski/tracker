@@ -3,6 +3,7 @@ import { analyzePullRequest, recomputeAnalysis } from '../../analysis/service';
 import { gitHubContextForWorkspace, tokenProvider } from '../../github/context';
 import { GitHubAuthError } from '../../github/http';
 import { runBackfill } from '../../ingest/backfill';
+import { runHistorySync } from '../../ingest/history';
 import { enqueueWorkspaceSyncs, runIncrementalSync } from '../../ingest/incremental';
 import { reprocessFromRaw } from '../../ingest/reprocess';
 import { markInstallationNeedsAttention, reconcileRepositories } from '../../installations/service';
@@ -48,6 +49,26 @@ export const handlers: HandlerRegistry = {
         },
       );
       ctx.log('backfill run', { ...outcome, repositoryId: ctx.payload.repositoryId });
+    });
+  },
+
+  'repository.history_sync': async (ctx) => {
+    await withInstallationHealth(ctx, async () => {
+      const github = await gitHubContextForWorkspace(ctx.db, ctx.workspaceId);
+      const outcome = await runHistorySync(
+        ctx.db,
+        {
+          workspaceId: ctx.workspaceId,
+          repositoryId: ctx.payload.repositoryId,
+          from: ctx.payload.from ? new Date(ctx.payload.from) : null,
+        },
+        {
+          graphql: github.graphql,
+          rateLimit: github.rateLimit,
+          pagesPerRun: github.sync.historyPagesPerRun,
+        },
+      );
+      ctx.log('history sync run', { ...outcome, repositoryId: ctx.payload.repositoryId });
     });
   },
 
