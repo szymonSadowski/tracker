@@ -1,0 +1,340 @@
+import { describe, expect, it } from 'vitest';
+import { databaseFixture } from '../helpers/db';
+import {
+  at,
+  seedContributor,
+  seedMembership,
+  seedPullRequest,
+  seedRepository,
+  seedUser,
+  seedWorkspace,
+} from '../helpers/factories';
+import {
+  AccessDeniedError,
+  allowAll,
+  assertMayViewContributor,
+  resolveWorkspaceAccess,
+  type PermissionChecker,
+} from '../../src/auth/access';
+import { createSession, resolveSession, revokeSession } from '../../src/auth/session';
+import { contributorForUser, upsertUser } from '../../src/auth/users';
+import { teamMetrics } from '../../src/analysis/aggregate';
+import { analyzePullRequest } from '../../src/analysis/service';
+import { workspaceScope } from '../../src/db/scope';
+import { invalidatePermissionCache } from '../../src/installations/service';
+import type { RepositoryRecord } from '../../src/repositories/store';
+
+const db = databaseFixture();
+
+const period = {
+  start: new Date('2026-01-01T00:00:00Z'),
+  end: new Date('2027-01-01T00:00:00Z'),
+  label: '',
+};
+
+class ScriptedChecker implements PermissionChecker {
+  calls = 0;
+
+  constructor(private readonly readable: Set<string>) {}
+
+  async canRead(repository: RepositoryRecord): Promise<boolean> {
+    this.calls++;
+    return this.readable.has(repository.name);
+  }
+}
+
+async function fixture() {
+  const workspace = await seedWorkspace(db());
+  const open = await seedRepository(db(), workspace.id, { name: 'open-repo' });
+  const secret = await seedRepository(db(), workspace.id, { name: 'secret-repo' });
+  const owner = await seedUser(db(), { login: 'owner' });
+  const member = await seedUser(db(), { login: 'member' });
+  const outsider = await seedUser(db(), { login: 'outsider' });
+  await seedMembership(db(), workspace.id, owner.id, 'owner');
+  await seedMembership(db(), workspace.id, member.id, 'member');
+  return { workspace, open, secret, owner, member, outsider };
+}
+
+describe('workspace access', () => {
+  it('refuses a user who is not a member without saying whether the workspace exists', async () => {
+    const { workspace, outsider } = await fixture();
+    const user = (
+      await db().query<{ id: string }>('SELECT id FROM users WHERE id = $1', [outsider.id])
+    ).rows[0]!;
+
+    await expect(
+      resolveWorkspaceAccess(db(), {
+        workspaceId: workspace.id,
+        user: {
+          id: user.id,
+          githubUserId: 1,
+          githubNodeId: 'U_x',
+          login: 'outsider',
+          name: null,
+          avatarUrl: null,
+        },
+        checker: allowAll,
+        permissionCacheSeconds: 300,
+      }),
+    ).rejects.toBeInstanceOf(AccessDeniedError);
+
+    // The same error, and the same message, as for a workspace that does not exist.
+    await expect(
+      resolveWorkspaceAccess(db(), {
+        workspaceId: '00000000-0000-0000-0000-000000000000',
+        user: {
+          id: user.id,
+          githubUserId: 1,
+          githubNodeId: 'U_x',
+          login: 'outsider',
+          name: null,
+          avatarUrl: null,
+        },
+        checker: allowAll,
+        permissionCacheSeconds: 300,
+      }),
+    ).rejects.toThrow('Not found');
+  });
+
+  it('filters a member’s view to the repositories GitHub lets them read', async () => {
+    const { workspace, open, secret, member } = await fixture();
+    const author = await seedContributor(db(), workspace.id);
+    for (const repository of [open, secret]) {
+      await seedPullRequest(db(), {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        authorContributorId: author.id,
+        mergedAt: at(4),
+      });
+    }
+    const prs = await db().query<{ id: string }>('SELECT id FROM pull_requests');
+    for (const row of prs.rows) await db().transaction((tx) => analyzePullRequest(tx, row.id));
+
+    const checker = new ScriptedChecker(new Set(['open-repo']));
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user: {
+        id: member.id,
+        githubUserId: member.githubUserId,
+        githubNodeId: member.githubNodeId,
+        login: member.login,
+        name: null,
+        avatarUrl: null,
+      },
+      checker,
+      permissionCacheSeconds: 300,
+    });
+
+    expect(access.visibleRepositories.map((r) => r.name)).toEqual(['open-repo']);
+
+    const metrics = await teamMetrics(workspaceScope(db(), workspace.id), {
+      period,
+      repositoryIds: access.visibleRepositoryIds,
+    });
+    // The aggregate is over the visible repository only.
+    expect(metrics.mergedCount).toBe(1);
+  });
+
+  it('answers repeated checks from cache, and re-asks after an installation change', async () => {
+    const { workspace, member } = await fixture();
+    const checker = new ScriptedChecker(new Set(['open-repo', 'secret-repo']));
+    const user = {
+      id: member.id,
+      githubUserId: member.githubUserId,
+      githubNodeId: member.githubNodeId,
+      login: member.login,
+      name: null,
+      avatarUrl: null,
+    };
+    const resolve = () =>
+      resolveWorkspaceAccess(db(), {
+        workspaceId: workspace.id,
+        user,
+        checker,
+        permissionCacheSeconds: 300,
+      });
+
+    await resolve();
+    expect(checker.calls).toBe(2);
+    await resolve();
+    await resolve();
+    expect(checker.calls).toBe(2);
+
+    // A changed repository selection invalidates the cache immediately.
+    await invalidatePermissionCache(db(), workspace.id);
+    await resolve();
+    expect(checker.calls).toBe(4);
+  });
+
+  it('stops showing a repository once GitHub revokes access and the cache expires', async () => {
+    const { workspace, member } = await fixture();
+    const readable = new Set(['open-repo', 'secret-repo']);
+    const checker = new ScriptedChecker(readable);
+    const user = {
+      id: member.id,
+      githubUserId: member.githubUserId,
+      githubNodeId: member.githubNodeId,
+      login: member.login,
+      name: null,
+      avatarUrl: null,
+    };
+
+    const first = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user,
+      checker,
+      permissionCacheSeconds: 300,
+    });
+    expect(first.visibleRepositories).toHaveLength(2);
+
+    readable.delete('secret-repo');
+    await db().query("UPDATE repository_permissions SET expires_at = now() - interval '1 minute'");
+
+    const second = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user,
+      checker,
+      permissionCacheSeconds: 300,
+    });
+    expect(second.visibleRepositories.map((r) => r.name)).toEqual(['open-repo']);
+  });
+
+  it('requires ownership for configuration actions', async () => {
+    const { workspace, member, owner } = await fixture();
+    const asUser = (u: {
+      id: string;
+      githubUserId: number;
+      githubNodeId: string;
+      login: string;
+    }) => ({
+      id: u.id,
+      githubUserId: u.githubUserId,
+      githubNodeId: u.githubNodeId,
+      login: u.login,
+      name: null,
+      avatarUrl: null,
+    });
+
+    await expect(
+      resolveWorkspaceAccess(db(), {
+        workspaceId: workspace.id,
+        user: asUser(member),
+        checker: allowAll,
+        permissionCacheSeconds: 300,
+        requireOwner: true,
+      }),
+    ).rejects.toBeInstanceOf(AccessDeniedError);
+
+    const asOwner = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user: asUser(owner),
+      checker: allowAll,
+      permissionCacheSeconds: 300,
+      requireOwner: true,
+    });
+    expect(asOwner.role).toBe('owner');
+  });
+
+  it('restricts a colleague’s detail to owners and the contributor themselves', async () => {
+    const { workspace, member, owner } = await fixture();
+    const colleague = await seedContributor(db(), workspace.id, { login: 'someone-else' });
+    const self = await seedContributor(db(), workspace.id, {
+      login: member.login,
+      nodeId: member.githubNodeId,
+    });
+
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user: {
+        id: member.id,
+        githubUserId: member.githubUserId,
+        githubNodeId: member.githubNodeId,
+        login: member.login,
+        name: null,
+        avatarUrl: null,
+      },
+      checker: allowAll,
+      permissionCacheSeconds: 300,
+    });
+
+    await expect(assertMayViewContributor(db(), access, colleague.id)).rejects.toBeInstanceOf(
+      AccessDeniedError,
+    );
+    await expect(assertMayViewContributor(db(), access, self.id)).resolves.toBeUndefined();
+
+    const ownerAccess = await resolveWorkspaceAccess(db(), {
+      workspaceId: workspace.id,
+      user: {
+        id: owner.id,
+        githubUserId: owner.githubUserId,
+        githubNodeId: owner.githubNodeId,
+        login: owner.login,
+        name: null,
+        avatarUrl: null,
+      },
+      checker: allowAll,
+      permissionCacheSeconds: 300,
+    });
+    await expect(
+      assertMayViewContributor(db(), ownerAccess, colleague.id),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe('identity and sessions', () => {
+  it('recognizes a renamed GitHub account as the same user', async () => {
+    const first = await upsertUser(db(), {
+      githubUserId: 4242,
+      githubNodeId: 'U_stable',
+      login: 'ada',
+    });
+    const renamed = await upsertUser(db(), {
+      githubUserId: 4242,
+      githubNodeId: 'U_stable',
+      login: 'ada-lovelace',
+    });
+
+    expect(renamed.id).toBe(first.id);
+    expect((await db().query('SELECT id FROM users')).rows).toHaveLength(1);
+  });
+
+  it('links a signed-in user to their contributor record with no mapping step', async () => {
+    const workspace = await seedWorkspace(db());
+    const contributor = await seedContributor(db(), workspace.id, {
+      login: 'ada',
+      nodeId: 'U_ada',
+    });
+    const user = await upsertUser(db(), {
+      githubUserId: 11,
+      githubNodeId: 'U_ada',
+      login: 'ada',
+    });
+
+    const linked = await contributorForUser(db(), workspace.id, user);
+    expect(linked?.id).toBe(contributor.id);
+  });
+
+  it('expires an idle session and revokes one on sign-out', async () => {
+    const user = await seedUser(db());
+    const { token } = await createSession(db(), { userId: user.id, inactivityMinutes: 60 });
+
+    expect(await resolveSession(db(), token, { inactivityMinutes: 60 })).toBeDefined();
+
+    await revokeSession(db(), token);
+    expect(await resolveSession(db(), token, { inactivityMinutes: 60 })).toBeUndefined();
+
+    const second = await createSession(db(), { userId: user.id, inactivityMinutes: 60 });
+    await db().query(
+      "UPDATE sessions SET expires_at = now() - interval '1 minute' WHERE revoked_at IS NULL",
+    );
+    expect(await resolveSession(db(), second.token, { inactivityMinutes: 60 })).toBeUndefined();
+  });
+
+  it('stores only a hash of the session token', async () => {
+    const user = await seedUser(db());
+    const { token } = await createSession(db(), { userId: user.id, inactivityMinutes: 60 });
+    const { rows } = await db().query<{ id: string }>('SELECT id FROM sessions');
+    expect(rows[0]!.id).not.toBe(token);
+    expect(rows[0]!.id).toHaveLength(64);
+  });
+});
