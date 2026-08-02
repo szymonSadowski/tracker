@@ -6,6 +6,7 @@ import { listPullRequests, periodOfDays, type MetricScope } from '@/analysis/agg
 import { listTeams, listRoster } from '@/teams/store';
 import { syncStatus } from '@/repositories/store';
 import { CoverageNotice, PeriodSelector } from '@/ui/components';
+import { SyncRepositoryButton } from './sync-repository';
 import {
   formatDate,
   formatDuration,
@@ -46,6 +47,9 @@ export default async function PullRequestsPage({
   const repositoryIds = query.repository
     ? access.visibleRepositoryIds.filter((id) => id === query.repository)
     : access.visibleRepositoryIds;
+  // Undefined unless exactly one visible repository is selected — which is when syncing just that
+  // one is a meaningful thing to offer.
+  const selectedRepository = access.visibleRepositories.find((r) => r.id === query.repository);
 
   const state = query.state === 'open' || query.state === 'closed' ? query.state : 'merged';
   const filter: MetricScope = {
@@ -123,6 +127,13 @@ export default async function PullRequestsPage({
             {repository.name}
           </Link>
         ))}
+        {selectedRepository ? (
+          <SyncRepositoryButton
+            workspaceId={workspaceId}
+            repositoryId={selectedRepository.id}
+            repositoryName={selectedRepository.name}
+          />
+        ) : null}
       </div>
 
       <div className="period">

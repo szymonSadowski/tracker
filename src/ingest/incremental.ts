@@ -164,16 +164,25 @@ export interface OnDemandSyncOutcome {
 }
 
 /**
- * On-demand sync (spec: "Members can trigger a sync on demand"). Debounced per workspace: a
- * request inside the debounce window is accepted but enqueues nothing new.
+ * On-demand sync (spec: "Members can trigger a sync on demand"). Debounced: a request inside the
+ * debounce window is accepted but enqueues nothing new.
+ *
+ * `repositoryId` narrows the request to one repository, which is what the pull request list offers
+ * when it is filtered to a single one. The debounce narrows with it — a workspace-wide sync a
+ * moment ago should not silence a request for one repository, and vice versa — so the window is
+ * measured against requests for the same target.
  */
 export async function requestOnDemandSync(
   database: Database,
   workspaceId: string,
   debounceSeconds: number,
+  options: { repositoryId?: string } = {},
 ): Promise<OnDemandSyncOutcome> {
   return database.transaction(async (tx) => {
-    const repositories = await listRepositories(tx, workspaceId, { inScopeOnly: true });
+    const all = await listRepositories(tx, workspaceId, { inScopeOnly: true });
+    const repositories = options.repositoryId
+      ? all.filter((repository) => repository.id === options.repositoryId)
+      : all;
     const backfilling = repositories
       .filter((repository) => repository.backfillState !== 'complete')
       .map((repository) => ({ id: repository.id, fullName: repository.fullName }));
@@ -184,9 +193,10 @@ export async function requestOnDemandSync(
           WHERE workspace_id = $1
             AND type = 'repository.incremental_sync'
             AND payload->>'reason' = 'on_demand'
+            AND ($3::text IS NULL OR payload->>'repositoryId' = $3::text)
             AND created_at > now() - make_interval(secs => $2::double precision)
        ) AS recent`,
-      [workspaceId, debounceSeconds],
+      [workspaceId, debounceSeconds, options.repositoryId ?? null],
     );
     if (rows[0]!.recent) return { enqueued: 0, debounced: true, backfilling };
 

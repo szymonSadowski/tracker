@@ -444,7 +444,10 @@ export interface SyncStatusSummary {
    * The point from which the *workspace* is completely covered: the latest of the in-scope
    * repositories' coverage starts, since a period is only fully covered when every repository
    * covers it. Repositories that reached their first pull request bound nothing and are excluded.
-   * Null means no repository has recorded coverage yet.
+   *
+   * Null means nothing bounds coverage, which happens at both ends of the range: no repository has
+   * recorded coverage yet, or every one of them has been walked back to its first pull request. A
+   * surface therefore cannot read null as "incomplete" — it means "no claim to make".
    */
   coverageStart: Date | null;
   /** Repositories whose history sync is still running or paused. */

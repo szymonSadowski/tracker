@@ -35,10 +35,21 @@ export function formatDate(value: Date | null | undefined): string {
   });
 }
 
-/** A day without a time: coverage boundaries are read as dates, not as instants. */
+/**
+ * A coverage boundary as a day.
+ *
+ * Fixed to UTC, unlike `formatDate`: the boundary is a claim about what data exists, and rendering
+ * it in the viewer's zone shifts it a day either way — westward, into claiming a day of coverage
+ * that was never fetched. Same date for every viewer, matching the stored value.
+ */
 export function formatDay(value: Date | null | undefined): string {
   if (!value) return UNAVAILABLE;
-  return value.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+  return value.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  });
 }
 
 /**

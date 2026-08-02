@@ -21,6 +21,12 @@ interface HistoryOutcome {
   }[];
 }
 
+/** Today in the viewer's calendar, as the `yyyy-mm-dd` a date input expects. */
+function localToday(): string {
+  const now = new Date();
+  return new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
+}
+
 const STATUS_LABEL: Record<HistoryOutcome['repositories'][number]['status'], string> = {
   enqueued: 'queued',
   already_covered: 'already covered',
@@ -80,7 +86,10 @@ export function HistorySyncControl({ workspaceId }: { workspaceId: string }) {
         <input
           type="date"
           value={since}
-          max={new Date().toISOString().slice(0, 10)}
+          // The picker works in the viewer's own calendar, so the ceiling must be their today.
+          // A UTC date would be tomorrow or yesterday for anyone off the meridian — and for
+          // anyone ahead of it, would refuse the date they are actually living in.
+          max={localToday()}
           onChange={(event) => {
             setSince(event.target.value);
             setScope('since');
@@ -91,9 +100,10 @@ export function HistorySyncControl({ workspaceId }: { workspaceId: string }) {
         </button>
       </div>
       <p className="muted">
-        History is fetched in the background, oldest-first per repository, behind ordinary syncing
-        so current data stays fresh. A large organisation can take hours or days, and progress is
-        recorded as it goes — leaving this page does not stop it.
+        Each repository is walked backwards from its newest pull request, so coverage reaches
+        further back the longer it runs, and it runs behind ordinary syncing so current data stays
+        fresh. A large organisation can take hours or days; progress is recorded as it goes, and
+        leaving this page does not stop it.
       </p>
       {error ? <p className="notice notice-warn">{error}</p> : null}
       {outcome ? (

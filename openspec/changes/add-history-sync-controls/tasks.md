@@ -63,6 +63,9 @@
 - [x] 5.4 Extend `requestOnDemandSync` in `src/ingest/incremental.ts` to also return repositories
       skipped for incomplete backfill, and surface that in the existing sync route's response
       (spec: "Member triggers a sync during backfill")
+- [x] 5.5 Give `requestOnDemandSync` an optional `repositoryId`, narrowing both the fan-out and the
+      debounce window to that repository, and accept it on the sync route behind
+      `assertRepositoryVisible` (spec: "Member syncs a single repository")
 
 ## 6. UI
 
@@ -76,6 +79,8 @@
       (spec: "History sync progress is observable"), with the paused-for-rate-limits case worded
       distinctly from failure
 - [x] 6.5 Add shared presentation for coverage state in `src/ui/components.tsx`
+- [x] 6.6 Add a per-repository sync button to `app/w/[workspaceId]/pulls/page.tsx`, shown only while
+      the list is filtered to a single visible repository
 
 ## 7. Analytics surfaces
 
@@ -104,6 +109,8 @@
       absent for a covered-but-empty period
 - [x] 8.7 `tests/e2e`: request a history sync from settings and observe coverage extending; trigger
       sync-now twice and observe the debounced response surfaced
+- [x] 8.8 `tests/ingest`: a single-repository request enqueues only that repository, and the
+      debounce is measured per target rather than per workspace
 
 ## 9. Configuration and docs
 

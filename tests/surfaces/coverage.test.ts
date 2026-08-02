@@ -12,6 +12,7 @@ import { databaseFixture } from '../helpers/db';
 import { seedRepository, seedWorkspace } from '../helpers/factories';
 import { syncStatus } from '../../src/repositories/store';
 import { CoverageNotice, DataCompleteness } from '../../src/ui/components';
+import { formatDay } from '../../src/ui/format';
 
 const db = databaseFixture();
 
@@ -19,6 +20,15 @@ const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
 
 const notice = (props: Parameters<typeof CoverageNotice>[0]) =>
   renderToStaticMarkup(createElement(CoverageNotice, props));
+
+describe('coverage boundaries as days', () => {
+  it('reads the same day for every viewer, whatever their timezone', () => {
+    // Late in the UTC day: a viewer east of the meridian would see the next day, and one west of
+    // it would see a day of coverage that was never fetched.
+    expect(formatDay(new Date('2026-01-15T23:30:00.000Z'))).toBe('15 Jan 2026');
+    expect(formatDay(new Date('2026-01-15T00:15:00.000Z'))).toBe('15 Jan 2026');
+  });
+});
 
 describe('partial coverage notice', () => {
   it('names the date data begins when the period reaches back further', () => {

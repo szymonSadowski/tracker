@@ -18,7 +18,8 @@ sync endpoint already exists behind no UI.
   whether it is still running) and is safe to interrupt and resume, like the existing backfill.
 - Members can trigger an **immediate incremental sync** from the workspace UI, wired to the
   on-demand endpoint that already exists, with the debounce window surfaced rather than silently
-  swallowing the request.
+  swallowing the request. The request covers the whole workspace, or a single repository when the
+  member is looking at one — the pull request list offers it while filtered to a repository.
 - A repository's backfill state stops meaning "the last 90 days are present" and starts recording
   *how far back* coverage actually extends, so surfaces can distinguish "no PRs in that period"
   from "not synced that far back".
@@ -52,11 +53,13 @@ themselves are surfaces over that capability rather than a new one.
 - **Storage**: `src/repositories/store.ts` and a migration — repositories need coverage-depth and
   history-sync progress columns alongside `backfill_state` / `backfill_window_start`.
 - **API**: new history-sync route under `app/api/workspaces/[workspaceId]/`; existing
-  `app/api/workspaces/[workspaceId]/sync/route.ts` gains a client caller, and its
-  `{ enqueued, debounced }` result becomes user-visible.
+  `app/api/workspaces/[workspaceId]/sync/route.ts` gains a client caller, an optional
+  `repositoryId` guarded by the visibility check, and its `{ enqueued, debounced }` result becomes
+  user-visible.
 - **UI**: `app/w/[workspaceId]/settings/page.tsx` and `src/ui/components.tsx` — two controls plus
   per-repository coverage and progress display; both need client interactivity in what is currently
-  a server component.
+  a server component. `app/w/[workspaceId]/pulls/page.tsx` gains a per-repository sync button while
+  filtered to one repository.
 - **Rate limits**: a full-history backfill across an org is far more API traffic than a 90-day one;
   it must run under the existing `RATE_LIMIT_SAFETY_THRESHOLD` pause-and-resume path and must not
   starve incremental sync of quota.

@@ -145,9 +145,11 @@ keeping current data fresh is never starved by ingesting old data.
 
 ### Requirement: Members can trigger a sync on demand
 
-The system SHALL provide a way to request an immediate incremental sync for a workspace, subject to
-rate limiting, and SHALL tell the requester the outcome of their request — whether work was
-enqueued, or the request fell inside the rate limiting interval.
+The system SHALL provide a way to request an immediate incremental sync, subject to rate limiting,
+and SHALL tell the requester the outcome of their request — whether work was enqueued, or the
+request fell inside the rate limiting interval. A request SHALL be able to cover the whole
+workspace or a single repository, and the rate limiting interval SHALL be measured against
+requests covering the same target.
 
 #### Scenario: Member requests sync immediately after merging
 
@@ -167,3 +169,16 @@ enqueued, or the request fell inside the rate limiting interval.
 - **WHEN** a member triggers an on-demand sync while repositories are still backfilling
 - **THEN** repositories that have completed backfill are synced
 - **AND** the member is told which repositories were skipped because their history is still loading
+
+#### Scenario: Member syncs a single repository
+
+- **WHEN** a member triggers a sync while looking at one repository
+- **THEN** only that repository is synced
+- **AND** a workspace-wide sync moments earlier does not cause the request to be treated as
+  redundant
+
+#### Scenario: Member requests a sync for a repository they cannot see
+
+- **WHEN** a sync is requested for a repository the member cannot read on GitHub
+- **THEN** the request is refused in the same terms as any other unreadable resource, without
+  revealing whether the repository exists
