@@ -57,20 +57,42 @@
 - [x] 5.3 Confirm the build command runs migrations before the deployment goes live, and that
       `ANTHROPIC_API_KEY` is set on the deployment when classification is enabled — the drain runs in
       the web deployment, so Path A's advice to keep that key off it does not apply
+- [x] 5.4 Pin `regions` in `vercel.json` to the database's region (D7). The first deployment ran
+      `iad1` functions against a European database and every authenticated page paid ~10 sequential
+      transatlantic round trips
+      — `"regions": ["fra1"]` committed; redeploy required for it to take effect
+- [x] 5.5 Set the deployment's environment variables on **Preview** as well as Production. The first
+      deployment scoped them to Production only, so every preview URL returned 500
+      `Missing required environment variable GITHUB_APP_ID` — a failure that looks like broken code
+      — **not applicable to this deployment**: preview deployments are not used, so Production-only
+      scoping is deliberate. The failure mode stays documented in `docs/deploy.md` for anyone who
+      does use previews
+- [x] 5.6 Raise `JOBS_DRAIN_BUDGET_MS` from the 60000 default toward the route's `maxDuration`,
+      in steps, confirming each pass still returns (design Open Questions). Leave
+      `JOBS_DRAIN_RESERVE_MS` at 30000
+      — raised on the deployment; reserve left at 30000
 
 ## 6. Verification
 
 - [x] 6.1 Add a test asserting the three correctness rules hold for a bounded-pass-only deployment:
       stale jobs are recovered, periodic sync is enqueued with no user action, and no job type is
       executable by only one mechanism
-- [ ] 6.2 Deploy to a preview environment, drive it only by cron, and confirm a repository connects,
+- [x] 6.2 Deploy to a preview environment, drive it only by cron, and confirm a repository connects,
       backfills across multiple passes, and produces analysis rows
-- [ ] 6.3 Confirm `scheduled_tasks.last_run_at` advances under cron-only operation — the check that
+      — done on production 2026-08-03: repository connected, 130 jobs across six drain passes,
+      130 succeeded, 0 failed, 0 retried, 0 reclaimed, and the pull request list renders from the
+      resulting `pr_analysis` rows
+- [x] 6.3 Confirm `scheduled_tasks.last_run_at` advances under cron-only operation — the check that
       catches a drain which forgot to tick
-- [ ] 6.4 Confirm queue depth returns to zero between ticks at the chosen cron interval and budget;
+      — `scheduledTasksFired: 1` on the first pass of each drive, with no scheduler process running
+- [x] 6.4 Confirm queue depth returns to zero between ticks at the chosen cron interval and budget;
       record the observed job durations and set the reserve from them (design Open Questions)
+      — queue reached zero (`budgetExhausted: false`, then a pass claiming nothing); durations
+      recorded in design.md Open Questions; reserve confirmed at 30s rather than reduced
 - [ ] 6.5 Verify rollback: disable the cron, confirm work accumulates without loss, re-enable and
       confirm the queue drains
+      — half-demonstrated already: work accumulated for 25 minutes with no executor running and
+      every job of it ran to success afterwards. The deliberate disable/re-enable is still untested
 - [x] 6.6 Run `npm run lint`, `npm run typecheck`, and `npm test`
 
 ## 7. Documentation

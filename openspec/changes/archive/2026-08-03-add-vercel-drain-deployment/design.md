@@ -124,6 +124,30 @@ leaked secret at "someone can make the queue drain sooner".
 *Consequence*: the route cannot be used operationally to drain one workspace. That is what
 `npm run worker` with a shell is for.
 
+### D7 — Functions run in the database's region
+
+Pin the deployment's function region to the region the database is in (`regions` in `vercel.json`),
+and treat a mismatch as a misconfiguration rather than a tuning opportunity.
+
+*Why*: on Paths A and B the application and its database are neighbours, so a page that issues ten
+sequential queries pays roughly ten milliseconds for them and no one notices. Serverless breaks that
+assumption silently — Vercel defaults to `iad1` while a database is provisioned wherever it was
+convenient, and every one of those same ten queries becomes a ~90 ms intercontinental round trip.
+The code is identical; only the distance changed. Observed on the first deployment: `iad1` functions
+against a European database, and every authenticated navigation took seconds.
+
+This is not a job-execution concern — the drain is throughput-bound and tolerates latency well —
+but it is a deployment concern, and Path C is the first deployment where the two halves can end up
+on different continents by default.
+
+*Consequence*: Path C's procedure must name the region as a required step, not an optimisation.
+Co-location bounds the damage from sequential query patterns; it does not excuse them (see the
+follow-up work below).
+
+*Alternative considered*: leave the region to the operator and fix the query patterns instead.
+Rejected as the primary answer — the patterns are worth fixing on their own merits, but no amount
+of batching makes a transatlantic hop acceptable, and the region is one line.
+
 ## Risks / Trade-offs
 
 - **An implementer uses `Worker.drain()` anyway, and stuck jobs silently wedge repositories** → D2
@@ -139,6 +163,22 @@ leaked secret at "someone can make the queue drain sooner".
   and a committed sub-daily schedule fails the deploy → the trigger is deliberately *not* part of
   the application. Because D6 made it an ordinary authenticated HTTP call, any scheduler can drive
   it, so the plan constrains which driver to pick rather than whether the deployment works.
+- **The chosen driver does not meet its own advertised interval.** *Materialised on the first
+  deployment.* `.github/workflows/drain.yml` requests `*/5`; the first deployment observed **one
+  run in 25 minutes** — GitHub's `schedule:` trigger is best-effort and sheds load, and a newly
+  added workflow appears to fare worst. The documented "5 min floor, frequently later" understates
+  it: the realistic figure is 15–30 minutes.
+
+  Nothing breaks — work accumulates and a later pass clears it, which is the rollback property
+  working as designed — but at that cadence Sync-now is not usefully a button, and the product is
+  perpetually 20 minutes stale. **GitHub Actions is therefore not an adequate sole driver for a
+  deployment anyone uses**, and the driver table in `docs/deploy.md` should say so rather than
+  listing it first. A minute-level driver (cron-job.org, a Cloudflare Worker, or Vercel Pro's
+  `crons` block) is the real requirement; the workflow's value is `workflow_dispatch` for debugging
+  and a version-controlled fallback.
+
+  Partial mitigation: a larger budget makes each rare beat do far more work — see Open Questions,
+  now measured.
 - **A single bulk job exceeds any budget** — a workspace-wide recompute is one job that runs as long
   as it runs → run bulk recomputes from a shell (`npm run recompute`), documented in Path C.
 - **Overlapping passes waste invocations** → harmless by construction (`SKIP LOCKED`), and cheap
@@ -164,9 +204,35 @@ GitHub node id, so an outage of the executor is staleness, never data loss.
 
 ## Open Questions
 
-- **Budget and reserve values.** Both depend on the platform's maximum function duration and on
-  observed job durations, neither of which needs to be settled before the code is written. Start
-  conservative and tune from the counts the endpoint reports.
-- **Whether to add a message-queue trigger for Sync-now latency.** Deferred by D4 — it composes with
-  this design rather than changing it, so it can be decided after measuring how a one-minute cron
-  actually feels.
+- ~~**Budget and reserve values.**~~ **Resolved by measurement** on the first deployment
+  (2026-08-03), 130 jobs across six passes at the shipped defaults (budget 60 s, reserve 30 s, so a
+  30 s claiming window):
+
+  | | observed |
+  | --- | --- |
+  | jobs per pass | 13 – 32 |
+  | typical job | 1 – 2.3 s |
+  | longest single job | ~40 s (inferred: a pass with a 30 s window took 73 s wall-clock) |
+  | failed / retried / reclaimed | 0 / 0 / 0 across all 130 |
+
+  **Reserve stays at 30 s.** The 73-second pass is the justification: a pass never interrupts a job
+  in flight, so the reserve has to cover the *longest* job, not the typical one. An earlier instinct
+  to trim it toward the ~1.3 s average would have pushed passes past the function ceiling. Re-measure
+  before changing it — these jobs ran against small repositories, and backfill pages on a large one
+  will be slower.
+
+  **Budget should be raised** well above the 60 s default; the route already declares
+  `maxDuration = 300` and the deployment was using a fifth of it. Raise it in steps and confirm each
+  pass still returns, because the real ceiling is plan-dependent (Hobby is 60 s without Fluid
+  Compute, and the 73-second pass proves only that this deployment's ceiling exceeds 60 s, not that
+  it reaches 300). A killed invocation is recoverable — the job is left `running` and the next
+  pass's reclaim picks it up — but it is silent, so it is worth not provoking.
+
+  `budgetExhausted` is the operational signal this exposes: true means work remained when the pass
+  stopped, false means the queue was caught up. Draining to `false` is the "all done" check.
+- **Whether to add a message-queue trigger for Sync-now latency.** Deferred by D4. Sharper now that
+  the driver's real cadence is known: at 20+ minutes between beats, Sync-now enqueues and then does
+  nothing visible for a third of an hour. Fixing the cadence is the direct answer; a cheaper one is
+  for the sync route to fire a fire-and-forget call at the drain endpoint after enqueueing, making
+  the button's latency independent of the background cadence entirely. Both compose with this design
+  rather than changing it, so neither blocks the change.
