@@ -14,7 +14,8 @@ import type { GitHubInstallationDetails } from '../../src/installations/github-s
 import type { RestRepository } from '../../src/github/rest.js';
 import type { GitHubGraphQLClient, PullRequestPage } from '../../src/github/graphql.js';
 import { seedUser } from '../helpers/factories.js';
-import { Worker } from '../../src/jobs/worker.js';
+import { runDrain } from '../../src/jobs/drain.js';
+import type { HandlerRegistry } from '../../src/jobs/worker.js';
 import { runBackfill } from '../../src/ingest/backfill.js';
 import { analyzePullRequest } from '../../src/analysis/service.js';
 import { enqueueWorkspaceSyncs, requestOnDemandSync } from '../../src/ingest/incremental.js';
@@ -84,7 +85,7 @@ describe('install → backfill → analyze → team view', () => {
 
     // 2. Drain the queue with a worker. Backfill is fed a fixture GraphQL client; analysis runs
     //    for real, from the rows the normalizer wrote.
-    const worker = new Worker(db(), {
+    const workerHandlers: HandlerRegistry = {
       'repository.backfill': async (ctx) => {
         const repositories = await listRepositories(ctx.db, ctx.workspaceId);
         const target = repositories.find((r) => r.id === ctx.payload.repositoryId)!;
@@ -104,9 +105,10 @@ describe('install → backfill → analyze → team view', () => {
       'pull_request.analyze': async (ctx) => {
         await ctx.db.transaction((tx) => analyzePullRequest(tx, ctx.payload.pullRequestId));
       },
-    });
-    const outcomes = await worker.drain();
-    expect(outcomes.every((outcome) => outcome.result === 'succeeded')).toBe(true);
+    };
+    const outcome = await runDrain(db(), workerHandlers);
+    expect(outcome.claimed).toBeGreaterThan(0);
+    expect({ retried: outcome.retried, failed: outcome.failed }).toEqual({ retried: 0, failed: 0 });
 
     // 3. Both repositories are backfilled, and every pull request has an analysis record.
     const repositories = await listRepositories(db(), installed.workspaceId, { inScopeOnly: true });
@@ -175,7 +177,7 @@ describe('install → backfill → analyze → team view', () => {
     const installer = await seedUser(db(), { login: 'ada' });
     const installed = await ingestInstallation(db(), new FixtureGateway(), 999, installer.id);
 
-    const backfiller = new Worker(db(), {
+    const backfiller: HandlerRegistry = {
       'repository.backfill': async (ctx) => {
         const repositories = await listRepositories(ctx.db, ctx.workspaceId);
         const target = repositories.find((r) => r.id === ctx.payload.repositoryId)!;
@@ -193,8 +195,8 @@ describe('install → backfill → analyze → team view', () => {
         );
       },
       'pull_request.analyze': async () => {},
-    });
-    await backfiller.drain();
+    };
+    await runDrain(db(), backfiller);
 
     // Coverage after the default backfill reaches back exactly one window, no further.
     const windowStart = new Date(NOW.getTime() - 90 * 24 * 3600_000);
@@ -213,7 +215,7 @@ describe('install → backfill → analyze → team view', () => {
       createdAtHours: -24 * 400,
       mergedAtHours: 8,
     });
-    const historian = new Worker(db(), {
+    const historian: HandlerRegistry = {
       'repository.history_sync': async (ctx) => {
         await runHistorySync(
           ctx.db,
@@ -237,9 +239,13 @@ describe('install → backfill → analyze → team view', () => {
         );
       },
       'pull_request.analyze': async () => {},
+    };
+    const historyOutcome = await runDrain(db(), historian);
+    expect(historyOutcome.claimed).toBeGreaterThan(0);
+    expect({ retried: historyOutcome.retried, failed: historyOutcome.failed }).toEqual({
+      retried: 0,
+      failed: 0,
     });
-    const historyOutcomes = await historian.drain();
-    expect(historyOutcomes.every((outcome) => outcome.result === 'succeeded')).toBe(true);
 
     // Coverage now reaches the repository's first pull request, so nothing bounds it.
     const afterHistory = await syncStatus(db(), installed.workspaceId);

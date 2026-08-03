@@ -3,12 +3,11 @@
  * runs the work itself. Safe to run alongside another scheduler — due tasks are claimed with a
  * row lock.
  */
-import { closeDatabase, db } from '../db/client';
-import { syncDefaults } from '../config/env';
-import { registerScheduledTasks, runDueScheduledTasks, syncScheduleTask } from './scheduler';
+import { closeDatabase, executionDb } from '../db/client';
+import { defaultScheduledTasks, registerScheduledTasks, runDueScheduledTasks } from './scheduler';
 
-const tasks = [syncScheduleTask(syncDefaults().syncIntervalMinutes * 60)];
-await registerScheduledTasks(db(), tasks);
+const tasks = defaultScheduledTasks();
+await registerScheduledTasks(executionDb(), tasks);
 
 let stopping = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
@@ -18,7 +17,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 }
 
 while (!stopping) {
-  const fired = await runDueScheduledTasks(db(), tasks);
+  const fired = await runDueScheduledTasks(executionDb(), tasks);
   for (const result of fired) {
     console.log(JSON.stringify({ message: 'scheduled task fired', ...result }));
   }

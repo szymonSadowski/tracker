@@ -3,6 +3,7 @@
  * cannot delay the schedule and every run gets the queue's retry and observability behaviour
  * (design.md D11).
  */
+import { syncDefaults } from '../config/env';
 import type { Database, Queryable } from '../db/driver';
 import { enqueue } from './queue';
 
@@ -41,6 +42,17 @@ export const syncScheduleTask = (intervalSeconds: number): ScheduledTaskDefiniti
     return created;
   },
 });
+
+/**
+ * The scheduled tasks this deployment runs.
+ *
+ * One definition list, shared by the scheduler process and by any drain pass that ticks, so a
+ * deployment cannot end up with two disagreeing ideas of what is scheduled — or, worse, with a
+ * topology that ticks nothing at all.
+ */
+export function defaultScheduledTasks(): ScheduledTaskDefinition[] {
+  return [syncScheduleTask(syncDefaults().syncIntervalMinutes * 60)];
+}
 
 export async function registerScheduledTasks(
   db: Queryable,

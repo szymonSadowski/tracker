@@ -1,0 +1,44 @@
+# Drives job execution on a deployment with no resident worker (docs/deploy.md Path C).
+#
+# The drain endpoint is an ordinary authenticated HTTP call, so any scheduler can drive it. This
+# one lives in the repository so the schedule is version-controlled rather than a setting in a
+# dashboard nobody remembers exists.
+#
+# Not needed on Paths A and B — there, `npm run worker` and `npm run scheduler` do this.
+name: drain
+
+on:
+  schedule:
+    # Five minutes is GitHub's floor, and its scheduler is frequently later than that under load.
+    # That is tolerable here: one pass drains the whole queue, so a backfill is not slowed by the
+    # interval — only Sync-now responsiveness is. If that becomes a problem, move to a minute-level
+    # driver as described in docs/deploy.md.
+    - cron: '*/5 * * * *'
+  # So a pass can be forced while debugging, without waiting for the schedule.
+  workflow_dispatch:
+
+# A pass that overruns the interval must not stack up behind itself. Overlap is safe —
+# FOR UPDATE SKIP LOCKED means a second pass steps over held rows — but it is wasted minutes.
+concurrency:
+  group: drain
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Run one drain pass
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+          DRAIN_SECRET: ${{ secrets.JOBS_DRAIN_SECRET }}
+        run: |
+          if [ -z "$APP_URL" ] || [ -z "$DRAIN_SECRET" ]; then
+            echo "APP_URL variable or JOBS_DRAIN_SECRET secret is not set — see docs/deploy.md"
+            exit 1
+          fi
+          # --fail-with-body so a 404 (wrong or unset secret) fails the run loudly rather than
+          # succeeding silently, which is the failure mode worth catching here.
+          curl --fail-with-body --silent --show-error --max-time 120 \
+               -X POST "$APP_URL/api/jobs/drain" \
+               -H "Authorization: Bearer $DRAIN_SECRET"

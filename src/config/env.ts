@@ -78,11 +78,29 @@ export interface AuthConfig {
   baseUrl: string;
 }
 
+export interface JobsConfig {
+  /**
+   * Shared secret authenticating the drain endpoint. Unset means the endpoint refuses every
+   * request, so a deployment that does not use it is inert rather than open (design D6).
+   *
+   * Read from `JOBS_DRAIN_SECRET`, falling back to `CRON_SECRET`, which is the header Vercel's
+   * scheduler already sends.
+   */
+  drainSecret: string | undefined;
+  /** Wall-clock budget for one drain pass. */
+  drainBudgetMs: number;
+  /** Held back from the budget so a pass never starts a job it cannot finish (design D3). */
+  drainReserveMs: number;
+}
+
 export interface AppConfig {
   databaseUrl: string;
+  /** Optional direct (unpooled) connection used by job execution only (design D5). */
+  databaseUrlDirect: string | undefined;
   github: GitHubAppConfig;
   sync: SyncConfig;
   auth: AuthConfig;
+  jobs: JobsConfig;
 }
 
 let cached: AppConfig | undefined;
@@ -91,6 +109,7 @@ export function loadConfig(): AppConfig {
   if (cached) return cached;
   cached = {
     databaseUrl: required('DATABASE_URL'),
+    databaseUrlDirect: optional('DATABASE_URL_DIRECT'),
     github: {
       appId: required('GITHUB_APP_ID'),
       privateKey: normalizePrivateKey(required('GITHUB_APP_PRIVATE_KEY')),
@@ -115,8 +134,18 @@ export function loadConfig(): AppConfig {
       permissionCacheSeconds: integer('PERMISSION_CACHE_SECONDS', 300),
       baseUrl: optional('APP_BASE_URL') ?? 'http://localhost:3000',
     },
+    jobs: jobDefaults(),
   };
   return cached;
+}
+
+/** Job execution settings without requiring GitHub secrets — used by the drain endpoint. */
+export function jobDefaults(): JobsConfig {
+  return {
+    drainSecret: optional('JOBS_DRAIN_SECRET') ?? optional('CRON_SECRET'),
+    drainBudgetMs: integer('JOBS_DRAIN_BUDGET_MS', 60_000),
+    drainReserveMs: integer('JOBS_DRAIN_RESERVE_MS', 30_000),
+  };
 }
 
 /** Test seam: forget the memoized configuration. */
