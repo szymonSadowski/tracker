@@ -12,7 +12,7 @@ import { runDrain } from '../../src/jobs/drain';
 import { countJobs, enqueue, getJob } from '../../src/jobs/queue';
 import { defaultScheduledTasks, type ScheduledTaskDefinition } from '../../src/jobs/scheduler';
 import type { HandlerRegistry } from '../../src/jobs/worker';
-import { db as processDb, executionDb, setDatabase } from '../../src/db/client';
+import { db as processDb, directDatabaseUrl, executionDb, setDatabase } from '../../src/db/client';
 
 const db = databaseFixture();
 
@@ -267,7 +267,29 @@ describe('job execution', () => {
 describe('the execution database handle', () => {
   it('is the process handle when no direct connection is configured', () => {
     delete process.env.DATABASE_URL_DIRECT;
+    delete process.env.DATABASE_URL_UNPOOLED;
     expect(executionDb()).toBe(processDb());
+  });
+
+  it('reads the name Vercel’s Neon integration provisions', () => {
+    delete process.env.DATABASE_URL_DIRECT;
+    process.env.DATABASE_URL_UNPOOLED = 'postgres://direct.example:5432/tracker';
+    try {
+      expect(directDatabaseUrl()).toBe('postgres://direct.example:5432/tracker');
+    } finally {
+      delete process.env.DATABASE_URL_UNPOOLED;
+    }
+  });
+
+  it('prefers the explicit name over the integration’s', () => {
+    process.env.DATABASE_URL_DIRECT = 'postgres://explicit.example:5432/tracker';
+    process.env.DATABASE_URL_UNPOOLED = 'postgres://integration.example:5432/tracker';
+    try {
+      expect(directDatabaseUrl()).toBe('postgres://explicit.example:5432/tracker');
+    } finally {
+      delete process.env.DATABASE_URL_DIRECT;
+      delete process.env.DATABASE_URL_UNPOOLED;
+    }
   });
 
   it('still honours an installed test handle when a direct connection is configured', () => {

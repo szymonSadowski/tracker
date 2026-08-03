@@ -109,7 +109,8 @@ export function loadConfig(): AppConfig {
   if (cached) return cached;
   cached = {
     databaseUrl: required('DATABASE_URL'),
-    databaseUrlDirect: optional('DATABASE_URL_DIRECT'),
+    // `DATABASE_URL_UNPOOLED` is what Vercel's Neon integration provisions and keeps in sync.
+    databaseUrlDirect: optional('DATABASE_URL_DIRECT') ?? optional('DATABASE_URL_UNPOOLED'),
     github: {
       appId: required('GITHUB_APP_ID'),
       privateKey: normalizePrivateKey(required('GITHUB_APP_PRIVATE_KEY')),
