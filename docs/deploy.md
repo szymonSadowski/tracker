@@ -420,15 +420,40 @@ latency — a legitimate reason, not a required one.
 It deliberately carries **no `crons` block** — see [Driving the drain](#driving-the-drain) below,
 because the right answer depends on your plan.
 
+**Add your database's region to it.** This is not tuning; skipping it makes the application feel
+broken:
+
+```json
+{
+  "buildCommand": "npm run db:migrate && npm run build",
+  "regions": ["fra1"]
+}
+```
+
+Vercel defaults to `iad1` (Washington DC). A managed Postgres provisioned in Europe therefore sits
+an ocean away from every function by default, and an authenticated page issues roughly ten
+sequential queries — a workspace access check per repository, then the page's own reads. At ~1 ms
+per round trip they are invisible; at ~90 ms they are seconds of blank screen on every click. Paths
+A and B never expose this because the application and its database are neighbours there.
+
+Match the region to wherever your database actually lives (`fra1` Frankfurt, `iad1` US East,
+`arn1` Stockholm, …). If you use Neon's free tier, also check whether **scale-to-zero** is enabled:
+compute suspends after five minutes idle, and the first query afterwards waits seconds for it to
+wake — which reads as "slow when I come back, fine while I'm clicking".
+
 Set these in the Vercel project, on top of the [required variables](#required--all-three-processes):
 
 | Variable | Notes |
 | --- | --- |
 | `JOBS_DRAIN_SECRET` | presented as `Authorization: Bearer …`. **Until this is set the endpoint refuses every request**, which is how a non-Path-C deployment stays closed. `CRON_SECRET` is read as a fallback, since Vercel's scheduler already sends it |
-| `JOBS_DRAIN_BUDGET_MS` | wall-clock budget for one pass; default `60000` |
-| `JOBS_DRAIN_RESERVE_MS` | held back so a pass never starts a job it cannot finish; default `30000` |
+| `JOBS_DRAIN_BUDGET_MS` | wall-clock budget for one pass; default `60000`. **Raise it** — the route declares `maxDuration = 300`, so the default uses a fifth of the ceiling. Go up in steps and confirm each pass still returns, because the real ceiling is plan-dependent (60 s on Hobby without Fluid Compute) |
+| `JOBS_DRAIN_RESERVE_MS` | held back so a pass never starts a job it cannot finish; default `30000`. **Leave it alone.** It must cover the *longest* job, not the average one — measured jobs run 1–2 s but one backfill page took ~40 s |
 | `DATABASE_URL_DIRECT` | direct (unpooled) string used by job execution and migrations; pages keep using the pooled `DATABASE_URL`. **Set automatically** if you connected Neon through Vercel's integration — it provisions `DATABASE_URL_UNPOOLED`, which is read as a fallback |
 | `ANTHROPIC_API_KEY` | **only if classification is enabled** — see below |
+
+Set these on **Preview** as well as Production if you want preview deployments to work at all. Vercel
+scopes environment variables per environment, and a preview without them fails with
+`Missing required environment variable GITHUB_APP_ID` — which looks like a code fault and isn't.
 
 ### Driving the drain
 
@@ -458,25 +483,34 @@ curl -X POST https://<your-domain>/api/jobs/drain \
 
 | Driver | Interval | Notes |
 | --- | --- | --- |
-| **GitHub Actions** — `.github/workflows/drain.yml` | 5 min floor | committed and ready; free minutes are the constraint on private repositories — see below |
+| **Cloudflare Worker** on a cron trigger | 1 min | free tier; ~10 lines, the sturdiest option — **recommended** |
 | **cron-job.org** | 1 min | free, supports custom headers, nothing to deploy, but lives outside version control |
-| **Cloudflare Worker** on a cron trigger | 1 min | free tier; ~10 lines, the most reliable of the three |
+| **Vercel Pro** `crons` block | 1 min | no second vendor, config in the repository; costs a plan upgrade |
+| **GitHub Actions** — `.github/workflows/drain.yml` | 15–30 min in practice | committed and ready, but **not adequate as the only driver** — see below |
 
-`.github/workflows/drain.yml` is the default: it keeps the schedule in version control and adds no
-second vendor. It needs an `APP_URL` repository **variable** and a `JOBS_DRAIN_SECRET` repository
-**secret**, and can be fired by hand from the Actions tab while debugging.
+#### About the GitHub Actions workflow
 
-Two limits to know before relying on it. GitHub Actions bills **a whole minute per run, rounded
-up**, so a private repository's 2,000 free minutes cap the interval at roughly every 30 minutes —
-too slow to be useful. Public repositories get unlimited minutes and only the 5-minute floor
-applies. Scheduled workflows are also frequently delayed under load, and are **disabled
-automatically after 60 days of repository inactivity** — a quiet way for a deployment to stop
-syncing.
+`.github/workflows/drain.yml` is committed because a version-controlled schedule and a
+`workflow_dispatch` button are genuinely useful. It needs an `APP_URL` repository **variable** and a
+`JOBS_DRAIN_SECRET` repository **secret**, and can be fired by hand from the Actions tab.
 
-The five-minute floor costs less here than it appears: one pass drains the whole queue, and a
-re-enqueued backfill job is runnable immediately, so it is picked up within the same pass. The
-interval bounds Sync-now responsiveness, not throughput. Move to a minute-level driver when that
-becomes the complaint.
+**Do not rely on it as your only trigger.** It requests `*/5`, but GitHub's `schedule:` event is
+best-effort and sheds load: a first deployment observed **one run in twenty-five minutes**, and
+15–30 minutes is the realistic figure rather than the documented five. At that cadence Sync-now
+stops being a button — a member presses it and nothing visible happens for a third of an hour.
+
+Three further limits compound it. Actions bills **a whole minute per run, rounded up**, so a private
+repository's 2,000 free minutes cap the interval near 30 minutes anyway. Scheduled workflows only
+fire from the **default branch**, so a drain that works on a feature branch runs never until merged.
+And they are **disabled automatically after 60 days of repository inactivity** — a quiet way for a
+deployment to stop syncing.
+
+Nothing is lost while the driver is slow: jobs accumulate durably and a later pass clears the whole
+backlog, which is the rollback property working. The cost is staleness, and staleness is the
+product.
+
+If you are stuck on a slow driver temporarily, raise `JOBS_DRAIN_BUDGET_MS` so each rare pass gets
+through far more work. That trades away Sync-now latency, which a bigger budget cannot fix.
 
 A Cloudflare Worker is the sturdiest free option:
 
