@@ -15,18 +15,28 @@ export function db(): Database {
 }
 
 /**
+ * A direct (unpooled) connection string, when the deployment has one.
+ *
+ * `DATABASE_URL_UNPOOLED` is the name Vercel's Neon integration provisions and keeps in sync
+ * through a credential rotation, so it is read as a fallback: a project wired up that way needs no
+ * manual configuration, and nothing goes stale when the password changes.
+ */
+export function directDatabaseUrl(): string | undefined {
+  return process.env.DATABASE_URL_DIRECT ?? process.env.DATABASE_URL_UNPOOLED;
+}
+
+/**
  * The handle job execution uses (design D5).
  *
  * On a serverless deployment the request path wants a pooled endpoint, while a drain is a burst of
- * sequential work better served by a direct connection. `DATABASE_URL_DIRECT` is how a deployment
- * says so; with it unset — which is every container deployment — this is exactly `db()` and
- * nothing changes.
+ * sequential work better served by a direct connection. With no direct URL configured — which is
+ * every container deployment — this is exactly `db()` and nothing changes.
  *
  * A handle installed by `setDatabase` always wins, so tests run against one database.
  */
 export function executionDb(): Database {
   if (instance) return instance;
-  const direct = process.env.DATABASE_URL_DIRECT;
+  const direct = directDatabaseUrl();
   if (!direct) return db();
   if (!executionInstance) executionInstance = new PostgresDatabase(direct);
   return executionInstance;

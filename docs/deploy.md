@@ -427,7 +427,7 @@ Set these in the Vercel project, on top of the [required variables](#required--a
 | `JOBS_DRAIN_SECRET` | presented as `Authorization: Bearer …`. **Until this is set the endpoint refuses every request**, which is how a non-Path-C deployment stays closed. `CRON_SECRET` is read as a fallback, since Vercel's scheduler already sends it |
 | `JOBS_DRAIN_BUDGET_MS` | wall-clock budget for one pass; default `60000` |
 | `JOBS_DRAIN_RESERVE_MS` | held back so a pass never starts a job it cannot finish; default `30000` |
-| `DATABASE_URL_DIRECT` | direct (unpooled) Neon string used by job execution only; pages keep using the pooled `DATABASE_URL` |
+| `DATABASE_URL_DIRECT` | direct (unpooled) string used by job execution and migrations; pages keep using the pooled `DATABASE_URL`. **Set automatically** if you connected Neon through Vercel's integration — it provisions `DATABASE_URL_UNPOOLED`, which is read as a fallback |
 | `ANTHROPIC_API_KEY` | **only if classification is enabled** — see below |
 
 ### Driving the drain
