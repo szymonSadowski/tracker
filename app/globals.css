@@ -355,3 +355,119 @@ td.absent {
   margin: 6rem auto;
   text-align: center;
 }
+
+/* charts ----------------------------------------------------------------- */
+
+/*
+ * Charts are server-rendered SVG (design.md D7). The svg scales with its container and the page
+ * never scrolls sideways to accommodate one.
+ */
+.chart {
+  margin: 0 0 1.5rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.chart figcaption {
+  display: block;
+  margin-bottom: 0.6rem;
+}
+
+.chart-title {
+  font-weight: 600;
+}
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+
+.chart-axis {
+  font-size: 11px;
+  fill: var(--muted);
+}
+
+.chart-note {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.chart-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Each series carries a pattern as well as a label, so colour is never the only distinction. */
+.chart-key {
+  width: 1.6rem;
+  height: 0;
+  border-top: 2px solid var(--accent);
+}
+
+.chart-key-dashed {
+  border-top-style: dashed;
+}
+
+.chart-key-dotted {
+  border-top-style: dotted;
+}
+
+.chart-key-dashdot {
+  border-top-style: double;
+}
+
+.benchmark-tier {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+
+.benchmark-elite,
+.benchmark-good {
+  background: var(--surface);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.benchmark-needs_focus {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/*
+ * The values behind every chart, as text: present in the document for a screen reader and for
+ * anyone who needs the exact number, without a second visual copy of the chart.
+ */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}

@@ -27,7 +27,8 @@ import {
   type HistoryState,
   type RepositoryRecord,
 } from '../repositories/store';
-import { mapGraphQLPullRequest } from './graphql-map';
+import { graphQLFilesPaging, mapGraphQLPullRequest } from './graphql-map';
+import { completeFileList } from './files';
 import { persistPullRequest } from './normalize';
 
 /** Default pages per job run; the worker passes the configured `HISTORY_PAGES_PER_RUN`. */
@@ -157,6 +158,20 @@ export async function runHistorySync(
           skipped++;
           continue;
         }
+
+        // A file list longer than one page is completed before the pull request is persisted, so
+        // this path writes the same file records the others do.
+        const paging = graphQLFilesPaging(node);
+        if (paging.hasNextPage) {
+          const complete = await completeFileList(
+            deps.graphql,
+            { owner: repository.ownerLogin, name: repository.name, number: normalized.number },
+            paging,
+          );
+          normalized.files = complete.files;
+          normalized.filesTruncated = complete.truncated;
+        }
+
         await database.transaction((tx) =>
           persistPullRequest(tx, {
             workspaceId: input.workspaceId,

@@ -293,6 +293,7 @@ describe('pull request metrics', () => {
       pullRequest: {
         openedAt: BASE_TIME,
         readyForReviewAt: BASE_TIME,
+        firstCommitAt: at(-1),
         mergedAt: at(4),
         closedAt: at(4),
         isDraft: false,
@@ -301,6 +302,9 @@ describe('pull request metrics', () => {
         additions: 10,
         deletions: 5,
         changedFiles: 2,
+        filesTruncated: false,
+        fileDataPresent: false,
+        commentDataPresent: false,
       },
       reviews: [
         {

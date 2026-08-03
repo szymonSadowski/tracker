@@ -23,6 +23,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "next": "^15.4.0",
     "pg": "^8.13.1",
     "react": "^19.1.0",

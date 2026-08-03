@@ -73,12 +73,40 @@ describe('no cross-person ranking', () => {
 
   it('exposes no per-contributor leaderboard function', async () => {
     const aggregate = await import('../../src/analysis/aggregate.js');
+    const series = await import('../../src/analysis/series.js');
+    const benchmarks = await import('../../src/analysis/benchmarks.js');
     const teams = await import('../../src/teams/store.js');
-    const exported = [...Object.keys(aggregate), ...Object.keys(teams)];
+    const exported = [
+      ...Object.keys(aggregate),
+      ...Object.keys(series),
+      ...Object.keys(benchmarks),
+      ...Object.keys(teams),
+    ];
     const suspicious = exported.filter((name) =>
       /rank|leaderboard|topContributors|byThroughput|fastest|slowest/i.test(name),
     );
     expect(suspicious).toEqual([]);
+  });
+
+  /**
+   * The rollup layer is where a ranking would be cheapest to add, so the absence is asserted on
+   * its shape as well as its names: no exported aggregation function takes an ordering, and
+   * contributor scope names one contributor rather than accepting a set of them
+   * (spec: metric-aggregation "Aggregates never rank individuals against each other").
+   */
+  it('accepts no contributor ordering at any scope', async () => {
+    const offenders: string[] = [];
+    for (const file of ['src/analysis/aggregate.ts', 'src/analysis/series.ts']) {
+      const source = readFileSync(file, 'utf8');
+      for (const parameter of ['orderBy', 'sortBy', 'sortDirection', 'contributorIds']) {
+        if (new RegExp(`\\b${parameter}\\b`).test(source)) offenders.push(`${file}: ${parameter}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+
+    const series = await import('../../src/analysis/series.js');
+    // Every exported entry point takes the scope filter, which names at most one contributor.
+    expect(Object.keys(series)).toContain('metricSeries');
   });
 
   it('sorts a metric list by time, not by how a person performed', async () => {

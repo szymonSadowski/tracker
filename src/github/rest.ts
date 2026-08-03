@@ -38,6 +38,7 @@ export interface RestPullRequest {
   node_id: string;
   number: number;
   title: string;
+  body?: string | null;
   state: 'open' | 'closed';
   draft?: boolean;
   html_url: string;
@@ -72,6 +73,29 @@ export interface RestCommit {
   };
   author: RestUser | null;
   stats?: { additions: number; deletions: number };
+}
+
+export interface RestFile {
+  filename: string;
+  additions: number;
+  deletions: number;
+  /** added | modified | removed | renamed | copied | changed | unchanged */
+  status: string;
+  previous_filename?: string;
+}
+
+export interface RestReviewComment {
+  id: number;
+  node_id: string;
+  user: RestUser | null;
+  created_at: string;
+  /** GitHub's numeric review id. The node id is not exposed here, so the link stays unresolved. */
+  pull_request_review_id?: number | null;
+}
+
+/** The commit detail view. Unlike the list view it carries per-file statistics. */
+export interface RestCommitDetail extends RestCommit {
+  files?: RestFile[];
 }
 
 export interface RestTimelineEvent {
@@ -165,6 +189,34 @@ export class GitHubRestClient {
       `/repos/${owner}/${repo}/issues/${number}/timeline?per_page=100`,
       (payload) => payload as RestTimelineEvent[],
     );
+  }
+
+  /**
+   * The pull request's changed files. GitHub enumerates at most 3000; a longer list comes back
+   * short, which the caller records as truncated rather than treating as complete.
+   */
+  async listPullRequestFiles(owner: string, repo: string, number: number): Promise<RestFile[]> {
+    return this.paginate<RestFile>(
+      `/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`,
+      (payload) => payload as RestFile[],
+    );
+  }
+
+  /** Comments left on the diff, including those attached to a review submission. */
+  async listReviewComments(
+    owner: string,
+    repo: string,
+    number: number,
+  ): Promise<RestReviewComment[]> {
+    return this.paginate<RestReviewComment>(
+      `/repos/${owner}/${repo}/pulls/${number}/comments?per_page=100`,
+      (payload) => payload as RestReviewComment[],
+    );
+  }
+
+  /** Per-commit file statistics — the exact input to the post-review rework component (D2). */
+  async getCommit(owner: string, repo: string, sha: string): Promise<RestCommitDetail> {
+    return (await this.request<RestCommitDetail>(`/repos/${owner}/${repo}/commits/${sha}`)).data;
   }
 
   async getAuthenticatedUser(): Promise<RestUser> {

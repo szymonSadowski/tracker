@@ -374,7 +374,7 @@ export async function startSyncRun(
   input: {
     workspaceId: string;
     repositoryId: string;
-    kind: 'backfill' | 'incremental' | 'reprocess' | 'history';
+    kind: 'backfill' | 'incremental' | 'reprocess' | 'history' | 'file_fill_in' | 'commit_sync';
     windowStart?: Date | null;
     windowEnd?: Date | null;
   },
@@ -401,12 +401,14 @@ export async function finishSyncRun(
     pullRequestsSeen?: number;
     error?: string | null;
     cursor?: string | null;
+    /** Why a run stopped short: a rate limit pause reads differently from a failure. */
+    pauseReason?: string | null;
   },
 ): Promise<void> {
   await db.query(
     `UPDATE sync_runs
         SET status = $2, finished_at = now(), pull_requests_seen = COALESCE($3, pull_requests_seen),
-            error = $4, cursor = $5
+            error = $4, cursor = $5, pause_reason = $6
       WHERE id = $1`,
     [
       syncRunId,
@@ -414,6 +416,7 @@ export async function finishSyncRun(
       outcome.pullRequestsSeen ?? null,
       outcome.error ?? null,
       outcome.cursor ?? null,
+      outcome.pauseReason ?? null,
     ],
   );
 }

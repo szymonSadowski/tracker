@@ -152,9 +152,10 @@ describe('install → backfill → analyze → team view', () => {
     // Four human pull requests (two per repository); the two bot ones are excluded by default.
     expect(metrics.mergedCount).toBe(4);
     expect(drillThrough).toHaveLength(metrics.mergedCount);
-    // Each pull request is ready for review 2h after it opens, so cycle time is measured from
-    // there: 6h and 2h across four pull requests → a 4h median.
-    expect(formatDuration(metrics.cycleTime.median)).toBe('4h');
+    // Cycle time is anchored at the first commit, an hour before the pull request opens
+    // (design.md D1), so it covers an hour more than the ready-for-review anchor would:
+    // 7h and 3h across four pull requests → a 5h median.
+    expect(formatDuration(metrics.cycleTime.median)).toBe('5h');
     expect(metrics.cycleTime.covered).toBe(4);
     // First review at +4h, ready at +2h.
     expect(formatDuration(metrics.timeToFirstReview.median)).toBe('2h');

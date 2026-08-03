@@ -25,6 +25,27 @@ export function periodOfDays(days: number, now: Date = new Date()): Period {
   };
 }
 
+/**
+ * A chart bucket's own window, as carried in a drill-through link. Returns undefined for anything
+ * malformed, so a hand-edited URL falls back to the selected period rather than erroring.
+ */
+export function parseBucketWindow(
+  from: string | undefined,
+  to: string | undefined,
+): Period | undefined {
+  if (!from || !to) return undefined;
+  const start = new Date(from);
+  const end = new Date(to);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start) {
+    return undefined;
+  }
+  return {
+    start,
+    end,
+    label: `${start.toISOString().slice(0, 10)} to ${end.toISOString().slice(0, 10)}`,
+  };
+}
+
 /** The period immediately before `period`, for a trend against one's own previous period. */
 export function previousPeriod(period: Period): Period {
   const span = period.end.getTime() - period.start.getTime();
@@ -66,7 +87,7 @@ export interface TeamMetrics {
   contributors: number;
 }
 
-interface Predicate {
+export interface Predicate {
   sql: string;
   params: unknown[];
 }
@@ -75,7 +96,7 @@ interface Predicate {
  * One predicate builder shared by the aggregates and by the drill-through list, so the list can
  * be exactly the set the aggregate was computed from (spec: analytics-dashboard).
  */
-function buildPredicate(scope: MetricScope, options: { merged: boolean }): Predicate {
+export function buildPredicate(scope: MetricScope, options: { merged: boolean }): Predicate {
   const params: unknown[] = [];
   const clauses = ['a.workspace_id = :workspace'];
 
@@ -107,11 +128,27 @@ function buildPredicate(scope: MetricScope, options: { merged: boolean }): Predi
   }
 
   if (scope.teamId) {
+    /**
+     * Attribution follows the membership interval the pull request falls in, so someone who moved
+     * teams mid-period takes their earlier work with them rather than backdating all of it to
+     * where they ended up (spec: "attributed to the team they belonged to on the merge date").
+     *
+     * The earliest interval is treated as reaching back indefinitely: a first assignment says who
+     * someone is, and would otherwise silently drop every pull request they merged before an
+     * owner got round to filling in the roster.
+     */
     clauses.push(
-      `EXISTS (SELECT 1 FROM team_members tm
+      `EXISTS (SELECT 1 FROM team_memberships tm
                 WHERE tm.workspace_id = a.workspace_id
                   AND tm.contributor_id = a.author_contributor_id
-                  AND tm.team_id = ${push(scope.teamId)})`,
+                  AND tm.team_id = ${push(scope.teamId)}
+                  AND (COALESCE(a.merged_at, a.opened_at) >= tm.started_at
+                       OR NOT EXISTS (SELECT 1 FROM team_memberships earlier
+                                       WHERE earlier.workspace_id = tm.workspace_id
+                                         AND earlier.contributor_id = tm.contributor_id
+                                         AND earlier.started_at < tm.started_at))
+                  AND (tm.ended_at IS NULL
+                       OR COALESCE(a.merged_at, a.opened_at) < tm.ended_at))`,
     );
   } else if (scope.unassignedOnly) {
     clauses.push(
@@ -248,7 +285,13 @@ export interface PullRequestListItem {
 export async function listPullRequests(
   scope: WorkspaceScope,
   filter: MetricScope,
-  options: { merged?: boolean; limit?: number; state?: 'open' | 'closed' | 'merged' } = {},
+  options: {
+    merged?: boolean;
+    limit?: number;
+    state?: 'open' | 'closed' | 'merged';
+    /** Narrows to one classified work type, for a work-mix segment drill-through. */
+    workType?: string;
+  } = {},
 ): Promise<PullRequestListItem[]> {
   const predicate = buildPredicate(filter, { merged: options.merged ?? true });
   const params = [...predicate.params];
@@ -256,6 +299,14 @@ export async function listPullRequests(
   if (options.state) {
     params.push(options.state);
     extra = ` AND a.pr_state = $${params.length}`;
+  }
+  if (options.workType) {
+    params.push(options.workType);
+    extra += ` AND EXISTS (SELECT 1 FROM pr_classifications k
+                            WHERE k.workspace_id = a.workspace_id
+                              AND k.pull_request_id = a.pull_request_id
+                              AND k.status = 'classified'
+                              AND k.work_type = $${params.length})`;
   }
   params.push(options.limit ?? 200);
   const limitParam = `$${params.length}`;

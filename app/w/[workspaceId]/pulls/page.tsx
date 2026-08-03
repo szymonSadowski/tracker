@@ -2,7 +2,12 @@ import Link from 'next/link';
 import { db } from '@/db/client';
 import { workspaceScope } from '@/db/scope';
 import { loadWorkspacePage } from '@/ui/page-access';
-import { listPullRequests, periodOfDays, type MetricScope } from '@/analysis/aggregate';
+import {
+  listPullRequests,
+  parseBucketWindow,
+  periodOfDays,
+  type MetricScope,
+} from '@/analysis/aggregate';
 import { listTeams, listRoster } from '@/teams/store';
 import { syncStatus } from '@/repositories/store';
 import { CoverageNotice, PeriodSelector } from '@/ui/components';
@@ -30,6 +35,10 @@ export default async function PullRequestsPage({
     repository?: string;
     author?: string;
     state?: string;
+    /** A chart bucket's own window, so a point on a chart opens exactly its pull requests. */
+    from?: string;
+    to?: string;
+    workType?: string;
   }>;
 }) {
   const { workspaceId } = await params;
@@ -38,7 +47,13 @@ export default async function PullRequestsPage({
   const scope = workspaceScope(db(), workspaceId);
 
   const days = parsePeriodDays(query.period);
-  const period = periodOfDays(days);
+  /**
+   * A drill-through from a chart carries the bucket's own boundaries. They narrow the period
+   * rather than replacing it, so the list is exactly the set the bucket was computed from
+   * (spec: analytics-dashboard "A viewer drills into a phase").
+   */
+  const bucket = parseBucketWindow(query.from, query.to);
+  const period = bucket ?? periodOfDays(days);
   const status = await syncStatus(db(), workspaceId);
   const teams = await listTeams(scope);
   const roster = await listRoster(scope);
@@ -61,6 +76,7 @@ export default async function PullRequestsPage({
   const pullRequests = await listPullRequests(scope, filter, {
     merged: state === 'merged',
     state,
+    workType: query.workType,
   });
 
   const link = (overrides: Record<string, string | undefined>) => {
@@ -85,8 +101,9 @@ export default async function PullRequestsPage({
         {pullRequests.length} pull request{pullRequests.length === 1 ? '' : 's'}
         {query.team
           ? ` for ${teams.find((team) => team.id === query.team)?.name ?? 'team'}`
-          : ''}{' '}
-        in the last {days} days
+          : ''}
+        {query.workType ? ` classified as ${query.workType.replace('_', ' ')}` : ''}{' '}
+        {bucket ? `in ${bucket.label}` : `in the last ${days} days`}
       </p>
 
       <PeriodSelector days={days} options={PERIOD_OPTIONS} basePath={`/w/${workspaceId}/pulls`} />

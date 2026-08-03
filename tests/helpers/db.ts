@@ -12,14 +12,26 @@ import { PostgresDatabase } from '../../src/db/pg';
 import { setDatabase } from '../../src/db/client';
 import { PGliteDatabase } from './pglite';
 
+// `benchmark_thresholds` is deliberately absent: it is seeded reference data, not workspace data,
+// and truncating it would empty every tier the aggregates read.
 const TABLES = [
   'pr_analysis',
+  'pr_classifications',
+  'pr_review_comments',
+  'pr_commit_files',
+  'pr_files',
   'pr_events',
   'pr_commits',
   'pr_reviews',
+  'repository_commits',
   'pull_requests',
   'sync_runs',
   'github_raw_events',
+  'repository_coverage',
+  'workspace_classification_settings',
+  'workspace_metric_settings',
+  'workspace_memberships',
+  'team_memberships',
   'team_members',
   'teams',
   'repository_permissions',

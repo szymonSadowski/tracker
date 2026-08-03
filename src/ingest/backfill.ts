@@ -21,7 +21,8 @@ import {
   startSyncRun,
   type RepositoryRecord,
 } from '../repositories/store';
-import { mapGraphQLPullRequest } from './graphql-map';
+import { graphQLFilesPaging, mapGraphQLPullRequest } from './graphql-map';
+import { completeFileList } from './files';
 import { persistPullRequest } from './normalize';
 
 /** Pages per job run. Bounded so one repository cannot monopolise a worker. */
@@ -98,6 +99,21 @@ export async function runBackfill(
           reachedWindowEdge = true;
           break;
         }
+
+        // The file connection arrives inline for almost every pull request; the rare one with
+        // more files than a page is completed here before it is persisted, so a partial list is
+        // never written as though it were whole (spec: "pages until the file list is complete").
+        const paging = graphQLFilesPaging(node);
+        if (paging.hasNextPage) {
+          const complete = await completeFileList(
+            deps.graphql,
+            { owner: repository.ownerLogin, name: repository.name, number: normalized.number },
+            paging,
+          );
+          normalized.files = complete.files;
+          normalized.filesTruncated = complete.truncated;
+        }
+
         await database.transaction((tx) =>
           persistPullRequest(tx, {
             workspaceId: input.workspaceId,
