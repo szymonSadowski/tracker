@@ -14,7 +14,7 @@ import {
   ThroughputChart,
   WorkMixView,
 } from '../../src/ui/metric-charts';
-import { LineChart } from '../../src/ui/charts';
+import { LineChart, StackedBarChart, seriesEncoding } from '../../src/ui/charts';
 import { parseGranularity } from '../../src/ui/format';
 import type { MetricBucket, WorkMixBucket } from '../../src/analysis/series';
 
@@ -123,10 +123,83 @@ describe('a partially covered series', () => {
     expect(html).toContain('Coding time');
     expect(html).toContain('Pickup time');
     expect(html).toContain('Review time');
-    // Each series carries a pattern class as well as its label.
-    expect(html).toContain('chart-key-dashed');
+    // Each series carries its encoding as well as its label, and a chart drawn with filled areas
+    // describes its series with filled swatches rather than line swatches.
+    expect(html).toContain('chart-key-fill');
+    expect(html).toContain(`chart-key-${seriesEncoding(1).key}`);
     // The decomposition says how much of the bucket it accounts for.
     expect(html).toContain('covers 4 of 4 merged pull requests');
+  });
+});
+
+/**
+ * A value present in a bucket is visible whatever its neighbours are (spec: "Only one bucket in a
+ * series has a value", "A value sits between two absent buckets"). A run of one point strokes a
+ * bare moveto, which draws nothing — the marker is what gives every run a form.
+ */
+describe('an isolated value', () => {
+  const line = (values: readonly (number | null)[]) =>
+    render(
+      LineChart({
+        title: 'Throughput',
+        series: [
+          {
+            name: 'Per contributor',
+            points: values.map((value, index) => ({ label: `b${index}`, value })),
+          },
+        ],
+        format: (value) => (value === null ? 'Not available' : String(value)),
+      }),
+    );
+
+  it('draws a mark for the only populated bucket in a series', () => {
+    const html = line([null, null, 4, null, null]);
+
+    expect([...html.matchAll(/<circle /g)]).toHaveLength(1);
+  });
+
+  it('draws every alternating value and connects none of them across a gap', () => {
+    const html = line([4, null, 6, null, 5]);
+
+    expect([...html.matchAll(/<circle /g)]).toHaveLength(3);
+    // A lineto would be a segment drawn through a bucket that has no value.
+    expect(html).not.toMatch(/d="M[^"]*L/);
+  });
+});
+
+describe('a stacked chart over shares', () => {
+  const shares = (name: string, value: number) => ({
+    name,
+    points: [{ label: 'week 1', value }],
+  });
+  // Rounded independently, these are what `series.ts` used to report: a whole plus one part in a
+  // thousand.
+  const drifted = [shares('New code', 0.5), shares('Refactor', 0.3), shares('Rework', 0.201)];
+  const format = (value: number | null) =>
+    value === null ? 'Not available' : `${Math.round(value * 100)}%`;
+
+  it('scales to the declared ceiling rather than to what the data rounded to', () => {
+    const html = render(
+      StackedBarChart({ title: 'Change composition', series: drifted, format, max: 1 }),
+    );
+
+    // 100%, not the 200% `niceMax` returns for a total of 1.001.
+    expect(html).toContain('>100%<');
+    const segments = [...html.matchAll(/<rect[^>]*chart-mark[^>]*>/g)].map((match) =>
+      Number(/height="([\d.]+)"/.exec(match[0])![1]),
+    );
+    // The plot is 180 units tall; the stack fills it rather than reaching half way.
+    expect(segments.reduce((sum, height) => sum + height, 0)).toBeGreaterThan(175);
+  });
+
+  it('gives each legend swatch the encoding its own marks carry', () => {
+    const html = render(StackedBarChart({ title: 'Change composition', series: drifted, format }));
+
+    drifted.forEach((_, index) => {
+      const key = seriesEncoding(index).key;
+      expect(html).toContain(`chart-key chart-key-fill chart-key-${key}`);
+      expect(html).toContain(`chart-mark chart-mark-${key}`);
+    });
   });
 });
 
@@ -186,8 +259,25 @@ describe('the churn chart', () => {
       }),
     );
 
+    // The rule answers "how far above", the bucket marker answers "which one", and the note
+    // answers both for a viewer who can read neither mark (design.md D5).
+    expect(html).toContain('chart-threshold');
+    expect(html).toContain('chart-bucket-mark');
     expect(html).toContain('needs-focus rework threshold');
     expect(html).toContain('week 2');
+  });
+
+  it('says the threshold is not drawn in line-count mode rather than dropping it silently', () => {
+    const html = render(
+      ChurnChart({
+        buckets: [bucket({ label: 'week 2' })],
+        reworkThreshold: 0.09,
+        absolute: true,
+      }),
+    );
+
+    expect(html).not.toContain('chart-threshold');
+    expect(html).toContain('not drawn on the line-count view');
   });
 });
 

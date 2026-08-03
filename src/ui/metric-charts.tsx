@@ -149,8 +149,13 @@ export function CycleTimePhaseChart({
 }
 
 /**
- * Churn composition. Shares by default because the question is usually "what kind of work is
- * this", with absolute line counts a toggle away for when the question is "how much".
+ * The composition of changed lines. Shares by default because the question is usually "what kind
+ * of work is this", with absolute line counts a toggle away for when the question is "how much".
+ *
+ * The chart is titled for what it draws rather than for the metric family it belongs to
+ * (design.md D6). "Code churn" outside this codebase means recently-written code rewritten again,
+ * which is the rework band alone — a viewer who knows the term reads "Code churn 95%" off a
+ * three-way composition as a catastrophe when 95% is the new-code band.
  */
 export function ChurnChart({
   buckets,
@@ -159,6 +164,9 @@ export function ChurnChart({
   toggleHref,
   coveredFrom,
   reworkThreshold,
+  refactorThreshold,
+  refactorBenchmark,
+  reworkRecencyDays = 21,
 }: {
   buckets: readonly MetricBucket[];
   drillThrough?: string;
@@ -167,20 +175,30 @@ export function ChurnChart({
   coveredFrom?: Date | null;
   /** The needs-focus rework threshold, so a bucket above it can be marked against it. */
   reworkThreshold?: number | null;
+  /** The needs-focus refactor threshold, stated in the note rather than drawn (design.md D5). */
+  refactorThreshold?: number | null;
+  refactorBenchmark?: BenchmarkAssignment;
+  /** The workspace's rework recency window, so "recently written" carries a number. */
+  reworkRecencyDays?: number;
 }) {
   const pick = (
     lines: (bucket: MetricBucket) => number | null,
     share: (bucket: MetricBucket) => number | null,
   ) => (absolute ? lines : share);
 
+  // Stacked from the axis upwards, so the benchmarked bands sit against the axis the threshold
+  // rule is measured from. With rework on top of the stack its band would start at 70-odd percent
+  // and a rule at 9% would be a line the band's height could not be read against — which is the
+  // one thing the rule exists to allow (design.md D5).
   const series: ChartSeries[] = [
     {
-      name: 'New code',
+      // The band the published benchmarks actually score, named with the term they use for it.
+      name: 'Rework (code churn)',
       points: toPoints(
         buckets,
         pick(
-          (bucket) => bucket.churn?.newCodeLines ?? null,
-          (bucket) => bucket.churn?.newCodeShare ?? null,
+          (bucket) => bucket.churn?.reworkLines ?? null,
+          (bucket) => bucket.churn?.reworkShare ?? null,
         ),
         drillThrough,
       ),
@@ -197,12 +215,12 @@ export function ChurnChart({
       ),
     },
     {
-      name: 'Rework',
+      name: 'New code',
       points: toPoints(
         buckets,
         pick(
-          (bucket) => bucket.churn?.reworkLines ?? null,
-          (bucket) => bucket.churn?.reworkShare ?? null,
+          (bucket) => bucket.churn?.newCodeLines ?? null,
+          (bucket) => bucket.churn?.newCodeShare ?? null,
         ),
         drillThrough,
       ),
@@ -214,23 +232,71 @@ export function ChurnChart({
       ? []
       : buckets.filter((bucket) => (bucket.churn?.reworkShare ?? 0) >= reworkThreshold);
   const estimated = buckets.some((bucket) => bucket.churn?.usedRecencyEstimate);
+  // A share threshold has nothing to compare itself to on a line-count plot, so it is withheld
+  // there and said to be withheld rather than silently dropped (design.md D5).
+  const showThreshold = !absolute && reworkThreshold !== null && reworkThreshold !== undefined;
 
   return (
     <StackedBarChart
-      title={absolute ? 'Code churn (lines)' : 'Code churn (share)'}
-      description="New code, refactor, and rework per bucket."
+      title={absolute ? 'Change composition (lines)' : 'Change composition (share)'}
+      description={`New code, refactor, and rework per bucket. Rework counts lines rewritten within ${reworkRecencyDays} days of being written, or after the pull request's first review.`}
       series={series}
       format={absolute ? formatLines : formatShare}
+      // Shares are scaled to the whole they are shares of, never to what the data rounded to.
+      max={absolute ? undefined : 1}
+      threshold={
+        showThreshold
+          ? {
+              value: reworkThreshold,
+              label: 'needs-focus rework threshold',
+              marked: overThreshold.map((bucket) => bucket.label),
+            }
+          : null
+      }
       note={
         <>
           {coveredFrom ? (
             <>Per-file diff data exists from {coveredFrom.toISOString().slice(0, 10)} onwards. </>
           ) : null}
           {overThreshold.length > 0 ? (
+            // The prose is the accessible channel for the rule and the bucket markers, not a
+            // duplicate of them.
             <>
               {overThreshold.length} bucket(s) at or above the needs-focus rework threshold of{' '}
               {formatShare(reworkThreshold ?? null)}:{' '}
               {overThreshold.map((bucket) => bucket.label).join(', ')}.{' '}
+            </>
+          ) : null}
+          {absolute && reworkThreshold !== null && reworkThreshold !== undefined ? (
+            <>
+              The needs-focus rework threshold is a share, so it is not drawn on the line-count
+              view; switch to shares to see it.{' '}
+            </>
+          ) : null}
+          {refactorThreshold !== null && refactorThreshold !== undefined ? (
+            <>
+              The published study puts the needs-focus refactor band at{' '}
+              {formatShare(refactorThreshold)} and above.{' '}
+            </>
+          ) : null}
+          {/*
+            * Which end is better, attributed to the study rather than presented as a target this
+            * workspace set (spec: "A viewer asks what a high rework share means").
+            */}
+          <>
+            The published benchmark treats a lower rework share and a lower refactor share as
+            better; new code carries no benchmark.{' '}
+          </>
+          {refactorBenchmark ? (
+            <>
+              Refactor over this period:{' '}
+              <BenchmarkTier
+                tier={refactorBenchmark.tier}
+                lowerBound={refactorBenchmark.lowerBound}
+                upperBound={refactorBenchmark.upperBound}
+                source={refactorBenchmark.source}
+                format={formatShare}
+              />{' '}
             </>
           ) : null}
           {estimated ? (

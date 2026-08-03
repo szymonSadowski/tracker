@@ -203,16 +203,34 @@ export default async function TeamViewPage({
       : Promise.resolve([]),
   ]);
 
+  // The refactor share over the whole period, so the seeded `refactor_rate` band is read rather
+  // than carried. Over the period's lines rather than an average of bucket shares: a quiet week
+  // would otherwise weigh as much as a busy one.
+  const churnLines = churnBuckets.reduce(
+    (totals, bucket) => ({
+      refactor: totals.refactor + (bucket.churn?.refactorLines ?? 0),
+      all:
+        totals.all +
+        (bucket.churn
+          ? bucket.churn.newCodeLines + bucket.churn.refactorLines + bucket.churn.reworkLines
+          : 0),
+    }),
+    { refactor: 0, all: 0 },
+  );
+
   const period75 = {
     cycle_time: metrics.cycleTime.p75,
     pr_throughput:
       buckets.length > 0 ? (buckets.at(-1)?.throughputPerContributorDay ?? null) : null,
+    refactor_rate: churnLines.all > 0 ? churnLines.refactor / churnLines.all : null,
   };
   const benchmarks = assignTiers(period75, thresholds);
-  const reworkThreshold =
+  const needsFocusBound = (metric: string): number | null =>
     thresholds.find(
-      (threshold) => threshold.metric === 'rework_rate' && threshold.tier === 'needs_focus',
+      (threshold) => threshold.metric === metric && threshold.tier === 'needs_focus',
     )?.lowerBound ?? null;
+  const reworkThreshold = needsFocusBound('rework_rate');
+  const refactorThreshold = needsFocusBound('refactor_rate');
 
   const chartQuery = `period=${days}&team=${selectedTeam.id}`;
 
@@ -318,6 +336,9 @@ export default async function TeamViewPage({
           }`}
           coveredFrom={churnCoverage.start}
           reworkThreshold={reworkThreshold}
+          refactorThreshold={refactorThreshold}
+          refactorBenchmark={benchmarks.refactor_rate}
+          reworkRecencyDays={settings.reworkRecencyDays}
         />
         <CommitActivityChart
           buckets={buckets}

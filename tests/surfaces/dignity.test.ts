@@ -141,6 +141,42 @@ describe('no cross-person ranking', () => {
   });
 });
 
+/**
+ * design.md D7: the personal view's only comparison is against the viewer's own previous period,
+ * so it withholds benchmark tiers and thresholds while showing every neutral affordance the team
+ * view shows. The two views now differ in a way that reads as an oversight, and the instinct of the
+ * next person to read them side by side is to make them match — this is what fails when they do.
+ */
+describe('no industry norm on a personal surface', () => {
+  const PERSONAL_PAGES = [
+    'app/w/[workspaceId]/me/page.tsx',
+    'app/w/[workspaceId]/people/[contributorId]/page.tsx',
+  ];
+
+  it('passes no benchmark assignment or threshold into a chart', () => {
+    const offenders: string[] = [];
+    for (const file of PERSONAL_PAGES) {
+      const source = readFileSync(file, 'utf8');
+      // The props a chart takes to render a tier, a band, or a threshold rule.
+      for (const prop of ['benchmark', 'benchmarks', 'reworkThreshold', 'refactorThreshold']) {
+        if (new RegExp(`\\b${prop}=\\{`).test(source)) offenders.push(`${file}: ${prop}=`);
+      }
+      if (/BenchmarkTier/.test(source)) offenders.push(`${file}: BenchmarkTier`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('still shows the neutral affordances the team view shows', () => {
+    const source = readFileSync('app/w/[workspaceId]/me/page.tsx', 'utf8');
+
+    // Drill-through, the churn coverage statement, and the shares/lines toggle are facts about the
+    // data, not judgments about the person, so withholding them is a loss and not a protection.
+    expect(source).toMatch(/drillThrough=\{/);
+    expect(source).toMatch(/coveredFrom=\{/);
+    expect(source).toMatch(/toggleHref=\{/);
+  });
+});
+
 describe('drill-through and detail access', () => {
   async function scenario() {
     const workspace = await seedWorkspace(db());

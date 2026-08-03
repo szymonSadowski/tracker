@@ -39,6 +39,7 @@ import {
 } from '@/ui/metric-charts';
 import { metricDistribution, metricSeries } from '@/analysis/series';
 import { loadMetricSettings } from '@/analysis/settings';
+import { coverageStart, listCoverage } from '@/repositories/coverage';
 
 /**
  * The personal view: your own pull requests and metrics, compared with your own previous period.
@@ -49,10 +50,14 @@ export default async function PersonalPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ period?: string; granularity?: string }>;
+  searchParams: Promise<{ period?: string; granularity?: string; churn?: string }>;
 }) {
   const { workspaceId } = await params;
-  const { period: periodParam, granularity: granularityParam } = await searchParams;
+  const {
+    period: periodParam,
+    granularity: granularityParam,
+    churn: churnParam,
+  } = await searchParams;
   const { access, session } = await loadWorkspacePage(workspaceId);
   const scope = workspaceScope(db(), workspaceId);
 
@@ -88,21 +93,35 @@ export default async function PersonalPage({
     repositoryIds: access.visibleRepositoryIds,
     contributorId: contributor.id,
   };
+  // The bucket a chart point stands for, as one's own pull requests.
+  const drillThrough = `/w/${workspaceId}/pulls?period=${days}&author=${contributor.id}`;
   // The same rollup layer the team view reads, scoped to one contributor: their own values, with
   // no comparison set (design.md D10). Independent reads go together (design.md D2); the series
   // and the distribution wait only because they need the settings.
-  const [current, earlier, pullRequests, settings] = await Promise.all([
+  const [current, earlier, pullRequests, settings, coverageRecords] = await Promise.all([
     teamMetrics(scope, filter),
     teamMetrics(scope, { ...filter, period: previousPeriod(period) }),
     listPullRequests(scope, filter, { limit: 50 }),
     loadMetricSettings(db(), workspaceId),
+    listCoverage(db(), workspaceId, { repositoryIds: access.visibleRepositoryIds }),
   ]);
   const granularity = parseGranularity(granularityParam, days);
-  const [buckets, sizeDistribution] = await Promise.all([
+  const churnAbsolute = churnParam === 'lines';
+  const churnCoverage = coverageStart(
+    coverageRecords.filter((record) => record.dataClass === 'file_diffs'),
+    access.visibleRepositoryIds,
+  );
+  const [buckets, churnBuckets, sizeDistribution] = await Promise.all([
     metricSeries(scope, filter, {
       granularity,
       settings,
       coverageStart: status.coverageStart,
+    }),
+    // Churn coverage lags pull request coverage while the file fill-in runs, as on the team view.
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      coverageStart: churnCoverage.start,
     }),
     metricDistribution(scope, filter, { metric: 'size', settings }),
   ]);
@@ -142,9 +161,27 @@ export default async function PersonalPage({
           />
         }
       >
-        <ThroughputChart buckets={buckets} />
-        <CycleTimePhaseChart buckets={buckets} />
-        <ChurnChart buckets={buckets} />
+        {/*
+          * These charts take drill-through, the churn coverage statement, and the shares/lines
+          * toggle — facts about the data, which a person is as entitled to about their own work as
+          * a team is about theirs — and deliberately take no `benchmark`, `reworkThreshold`, or
+          * `refactorThreshold`. A published tier is an industry norm, and `docs/dignity-review.md`
+          * holds that the only comparison offered to an individual is against their own previous
+          * period, never against a colleague or a norm. The asymmetry with the team view is the
+          * rule, not an oversight; `tests/surfaces/dignity.test.ts` fails if it is "fixed".
+          */}
+        <ThroughputChart buckets={buckets} drillThrough={drillThrough} />
+        <CycleTimePhaseChart buckets={buckets} drillThrough={drillThrough} />
+        <ChurnChart
+          buckets={churnBuckets}
+          drillThrough={drillThrough}
+          absolute={churnAbsolute}
+          coveredFrom={churnCoverage.start}
+          reworkRecencyDays={settings.reworkRecencyDays}
+          toggleHref={`/w/${workspaceId}/me?period=${days}&granularity=${granularity}&churn=${
+            churnAbsolute ? 'shares' : 'lines'
+          }`}
+        />
         <CommitActivityChart buckets={buckets} filterNote="Your commits on default branches." />
         <DistributionView
           title="Your pull request size"
@@ -157,10 +194,7 @@ export default async function PersonalPage({
       <Section
         title="Your pull requests"
         aside={
-          <Link
-            className="muted"
-            href={`/w/${workspaceId}/pulls?period=${days}&author=${contributor.id}`}
-          >
+          <Link className="muted" href={drillThrough}>
             Open in the pull request list
           </Link>
         }

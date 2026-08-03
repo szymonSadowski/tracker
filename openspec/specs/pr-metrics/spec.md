@@ -186,7 +186,9 @@ request, without requiring a separate record or invalidating existing values.
 
 The system SHALL classify the lines changed by each merged pull request into new code, refactored
 code, and rework, and SHALL record each as a line count and as a share of the pull request's total
-changed lines. The three shares SHALL sum to the whole.
+changed lines. The three shares SHALL sum to the whole, and SHALL do so exactly at the precision
+they are reported in, so that a consumer may rely on the sum without re-deriving it from the line
+counts.
 
 - **new code** — lines added to a file where no prior line was replaced
 - **refactor** — lines that modify or delete code older than the rework recency window
@@ -224,6 +226,13 @@ changed lines. The three shares SHALL sum to the whole.
   generated code or lock files
 - **THEN** those lines are excluded from all three churn categories and from the total
 - **AND** the pull request records how many lines were excluded
+
+#### Scenario: The three shares do not divide evenly
+
+- **WHEN** a bucket's line counts produce shares that cannot each be represented exactly at the
+  reported precision, such as an equal three-way split
+- **THEN** the three reported shares still sum to exactly the whole
+- **AND** no reported share exceeds the whole
 
 ### Requirement: Review depth measures review conversation, not approval
 
