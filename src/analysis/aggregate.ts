@@ -5,8 +5,11 @@
  *
  * 1. Absent values are excluded from aggregates and the aggregate reports its own coverage, so a
  *    median over 4 of 30 pull requests can never be read as a median over 30 (design.md D6).
- * 2. There is no function that orders contributors by a throughput or latency metric. That
- *    absence is the enforcement of design.md D10 — a ranking cannot be built from this module.
+ * 2. There is no function that orders contributors by a throughput or latency metric, and none
+ *    that reports a latency, size, or churn metric per person on a team-scoped surface. That is
+ *    the enforcement of design.md D10 — a ranking cannot be built from this module. The single
+ *    per-person comparison the product offers is `contributorThroughputSeries` in `series.ts`:
+ *    merged counts only, in name order (D10 as amended by `add-per-author-throughput`).
  */
 import type { WorkspaceScope } from '../db/scope';
 import type { SizeBucket } from './metrics';

@@ -26,7 +26,10 @@ concurrency:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Must exceed the curl timeout below, which in turn must exceed JOBS_DRAIN_BUDGET_MS. A pass
+    # that outlives its caller still finishes server-side, but the run is reported as a failure and
+    # the next scheduled pass is the only thing that reports the counts.
+    timeout-minutes: 6
     steps:
       - name: Run one drain pass
         env:
@@ -39,6 +42,10 @@ jobs:
           fi
           # --fail-with-body so a 404 (wrong or unset secret) fails the run loudly rather than
           # succeeding silently, which is the failure mode worth catching here.
-          curl --fail-with-body --silent --show-error --max-time 120 \
+          #
+          # --max-time is the ceiling on JOBS_DRAIN_BUDGET_MS, not a detail: a budget above it
+          # gets the connection cut mid-pass. 290s leaves the budget room up to the route's
+          # maxDuration = 300 while staying inside timeout-minutes above.
+          curl --fail-with-body --silent --show-error --max-time 290 \
                -X POST "$APP_URL/api/jobs/drain" \
                -H "Authorization: Bearer $DRAIN_SECRET"

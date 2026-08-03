@@ -10,8 +10,11 @@
  * 2. **Bucketing happens in the database, in the workspace's time zone.** Postgres does the
  *    calendar and daylight-saving arithmetic, so a bucket assignment is the same on every
  *    recomputation and does not depend on the server's locale.
- * 3. **There is still no function that orders contributors.** Contributor scope returns one
- *    contributor's own values, with no comparison set.
+ * 3. **Nothing here orders contributors by a metric.** Contributor scope returns one contributor's
+ *    own values. `contributorThroughputSeries` is the single exception to there being no per-person
+ *    comparison set at all, and it returns merged counts in name order — the ordering is the
+ *    guarantee, so a ranking still cannot be read out of this module (design.md D10 as amended by
+ *    `add-per-author-throughput`).
  */
 import type { WorkspaceScope } from '../db/scope';
 import { buildPredicate, type MetricScope } from './aggregate';
@@ -217,10 +220,12 @@ export async function metricSeries(
     distributionSql(metric, `r.${metric}_seconds`),
   ).join(',');
 
-  const { rows } = await scope.query<Record<string, number | string | null> & {
-    bucket_start: Date;
-    bucket_end: Date;
-  }>(
+  const { rows } = await scope.query<
+    Record<string, number | string | null> & {
+      bucket_start: Date;
+      bucket_end: Date;
+    }
+  >(
     `WITH buckets AS (
        SELECT gs AS bucket_local,
               gs AT TIME ZONE ${tz} AS bucket_start,
@@ -434,8 +439,7 @@ export async function workMixSeries(
   for (const [key, bucket] of buckets) {
     bucket.unclassified = Math.max(0, (totals.get(key) ?? 0) - bucket.classified);
     if (bucket.classified === 0) continue;
-    const share = (count: number): number =>
-      Math.round((count / bucket.classified) * 1000) / 1000;
+    const share = (count: number): number => Math.round((count / bucket.classified) * 1000) / 1000;
     bucket.defectRatio = share(bucket.byType.bug_fix ?? 0);
     bucket.innovationRatio = share(bucket.byType.feature ?? 0);
   }
@@ -655,4 +659,154 @@ export async function commitCounts(
   );
 
   return new Map(rows.map((row) => [row.bucket_start.getTime(), row.commits]));
+}
+
+export interface ContributorSeries {
+  contributorId: string;
+  /** Display name, falling back to the login when GitHub has no name for the account. */
+  name: string;
+  login: string;
+  /**
+   * One value per bucket, aligned to {@link ContributorThroughput.buckets} by index.
+   *
+   * Zero and null mean different things here. Zero is "merged nothing in this bucket", which is a
+   * real measurement. Null is "was not a member of this workspace yet", which is not — drawing it
+   * as zero would show someone underperforming during months they had not been hired.
+   */
+  points: (number | null)[];
+}
+
+export interface ContributorThroughput {
+  buckets: { start: Date; end: Date; label: string; outsideCoverage: boolean }[];
+  contributors: ContributorSeries[];
+}
+
+/**
+ * Merged pull requests per bucket, per author (spec: analytics-dashboard "Throughput is available
+ * as a series per team member").
+ *
+ * This is the one function in the aggregate layer that returns a per-person comparison set, and it
+ * is deliberately narrow about how. It counts merged pull requests and nothing else — no latency,
+ * no size, no churn — because a count is the metric a person can inspect and dispute, and it is
+ * ordered by name so the result carries no ranking of its own. A caller that wants people sorted
+ * by output has to do that itself, in the open, rather than receiving it from here (design.md
+ * D10 as amended).
+ *
+ * Only authors with at least one merged pull request in the period appear: the alternative lists
+ * every member of the workspace with a flat zero line, which says more about who is being watched
+ * than about the work.
+ */
+export async function contributorThroughputSeries(
+  scope: WorkspaceScope,
+  filter: MetricScope,
+  options: SeriesOptions,
+): Promise<ContributorThroughput> {
+  const settings = options.settings ?? DEFAULT_METRIC_SETTINGS;
+  const { trunc, step } = GRANULARITY_SQL[options.granularity];
+
+  const merged = buildPredicate(filter, { merged: true });
+  const params = [...merged.params];
+  const push = (value: unknown): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const tz = push(settings.timeZone);
+  const rangeStart = push(filter.period.start);
+  const rangeEnd = push(filter.period.end);
+
+  const { rows } = await scope.query<{
+    bucket_start: Date;
+    bucket_end: Date;
+    contributor_id: string;
+    login: string;
+    name: string | null;
+    merged_count: number;
+    joined_at: Date | null;
+  }>(
+    `WITH buckets AS (
+       SELECT gs AS bucket_local,
+              gs AT TIME ZONE ${tz} AS bucket_start,
+              (gs + ${step}) AT TIME ZONE ${tz} AS bucket_end
+         FROM generate_series(
+                date_trunc('${trunc}', ${rangeStart}::timestamptz AT TIME ZONE ${tz}),
+                date_trunc('${trunc}', ${rangeEnd}::timestamptz AT TIME ZONE ${tz}),
+                ${step}) gs
+        WHERE gs AT TIME ZONE ${tz} < ${rangeEnd}::timestamptz
+     ),
+     rows AS (
+       SELECT a.pull_request_id, a.author_contributor_id,
+              date_trunc('${trunc}', a.merged_at AT TIME ZONE ${tz}) AS bucket_local
+         FROM pr_analysis a
+        WHERE ${merged.sql}
+          AND a.author_contributor_id IS NOT NULL
+     ),
+     authors AS (SELECT DISTINCT author_contributor_id AS id FROM rows)
+     SELECT b.bucket_start, b.bucket_end, a.id AS contributor_id,
+            c.login, c.name,
+            count(r.pull_request_id)::int AS merged_count,
+            -- When they first joined, so buckets that wholly precede it can be drawn as gaps. A
+            -- contributor carrying no membership row at all yields NULL and is masked nowhere:
+            -- an unknown join date must not silently erase someone's whole line.
+            (SELECT min(m.started_at) FROM workspace_memberships m
+              WHERE m.workspace_id = :workspace AND m.contributor_id = a.id) AS joined_at
+       FROM buckets b
+       CROSS JOIN authors a
+       JOIN contributors c ON c.id = a.id AND c.workspace_id = :workspace
+       LEFT JOIN rows r
+              ON r.bucket_local = b.bucket_local AND r.author_contributor_id = a.id
+      GROUP BY b.bucket_start, b.bucket_end, a.id, c.login, c.name
+      -- By name, never by the metric. This ORDER BY is the D10 guarantee in the one place the
+      -- module hands back a comparison set.
+      ORDER BY lower(COALESCE(c.name, c.login)), c.login, b.bucket_start`,
+    params,
+  );
+
+  const buckets: ContributorThroughput['buckets'] = [];
+  const seenBucket = new Set<number>();
+  const byContributor = new Map<string, ContributorSeries>();
+  const indexOfBucket = new Map<number, number>();
+
+  for (const row of rows) {
+    const key = row.bucket_start.getTime();
+    if (!seenBucket.has(key)) {
+      seenBucket.add(key);
+      indexOfBucket.set(key, buckets.length);
+      buckets.push({
+        start: row.bucket_start,
+        end: row.bucket_end,
+        label: bucketLabel(row.bucket_start, options.granularity, settings.timeZone),
+        outsideCoverage:
+          options.coverageStart !== undefined &&
+          options.coverageStart !== null &&
+          row.bucket_start < options.coverageStart,
+      });
+    }
+  }
+  // Buckets arrive interleaved with contributors, so they are sorted once rather than relied on
+  // to have come back in order for whichever contributor happened to be first.
+  buckets.sort((a, b) => a.start.getTime() - b.start.getTime());
+  indexOfBucket.clear();
+  buckets.forEach((bucket, index) => indexOfBucket.set(bucket.start.getTime(), index));
+
+  for (const row of rows) {
+    let series = byContributor.get(row.contributor_id);
+    if (!series) {
+      series = {
+        contributorId: row.contributor_id,
+        name: row.name ?? row.login,
+        login: row.login,
+        points: new Array<number | null>(buckets.length).fill(null),
+      };
+      byContributor.set(row.contributor_id, series);
+    }
+    const index = indexOfBucket.get(row.bucket_start.getTime());
+    if (index === undefined) continue;
+    // A bucket that ended before they joined is a gap; every other bucket is a real count, zero
+    // included. Merging nothing in a week you were here is a measurement, not a missing value.
+    const beforeJoining =
+      row.joined_at !== null && row.bucket_end.getTime() <= row.joined_at.getTime();
+    series.points[index] = beforeJoining ? null : Number(row.merged_count ?? 0);
+  }
+
+  return { buckets, contributors: [...byContributor.values()] };
 }

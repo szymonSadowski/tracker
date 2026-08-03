@@ -512,6 +512,13 @@ product.
 If you are stuck on a slow driver temporarily, raise `JOBS_DRAIN_BUDGET_MS` so each rare pass gets
 through far more work. That trades away Sync-now latency, which a bigger budget cannot fix.
 
+**Raise the driver's own timeout with it.** The budget is bounded by whatever the caller allows,
+not only by `maxDuration`: the committed workflow holds the connection for `--max-time` seconds
+inside `timeout-minutes`, and a budget above that gets cut mid-pass. The pass still finishes
+server-side — jobs are claimed and completed either way — but the run is reported as a failure and
+the counts are lost, so the driver looks broken while the queue is draining normally. The two
+values ship at 290s and 6 minutes, leaving room for a budget up to the route's 300s ceiling.
+
 A Cloudflare Worker is the sturdiest free option:
 
 ```js

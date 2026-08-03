@@ -22,6 +22,54 @@ async function snapshot(table: string, columns: string) {
 }
 
 describe('normalizer', () => {
+  it('anchors first_commit_at on the author date, so a rebase does not erase coding time', async () => {
+    const { workspaceId, repositoryId } = await workspaceWithRepo();
+    // The shape a rebase leaves behind: the work was written 20 hours before T0, then replayed
+    // onto the default branch an hour after it, moments before the pull request was opened.
+    const payload = graphqlPullRequest();
+    const commit = payload.commits!.nodes[0]!.commit;
+    commit.authoredDate = iso(-20);
+    commit.committedDate = iso(1);
+
+    await db().transaction((tx) =>
+      persistPullRequest(tx, {
+        workspaceId,
+        repositoryId,
+        pullRequest: mapGraphQLPullRequest(payload),
+        source: 'graphql_backfill',
+        rawPayload: payload,
+      }),
+    );
+
+    const pr = (
+      await db().query<{ first_commit_at: Date }>('SELECT first_commit_at FROM pull_requests')
+    ).rows[0]!;
+    expect(pr.first_commit_at.toISOString()).toBe(iso(-20));
+  });
+
+  it('falls back to the committer date when a commit carries no author date', async () => {
+    const { workspaceId, repositoryId } = await workspaceWithRepo();
+    const payload = graphqlPullRequest();
+    const commit = payload.commits!.nodes[0]!.commit;
+    commit.authoredDate = null;
+    commit.committedDate = iso(1);
+
+    await db().transaction((tx) =>
+      persistPullRequest(tx, {
+        workspaceId,
+        repositoryId,
+        pullRequest: mapGraphQLPullRequest(payload),
+        source: 'graphql_backfill',
+        rawPayload: payload,
+      }),
+    );
+
+    const pr = (
+      await db().query<{ first_commit_at: Date }>('SELECT first_commit_at FROM pull_requests')
+    ).rows[0]!;
+    expect(pr.first_commit_at.toISOString()).toBe(iso(1));
+  });
+
   it('writes a pull request with its reviews, commits, and events', async () => {
     const { workspaceId, repositoryId } = await workspaceWithRepo();
     const normalized = mapGraphQLPullRequest(graphqlPullRequest());

@@ -154,7 +154,13 @@ function chartId(title: string): string {
 function Hatch({ id }: { id: string }) {
   return (
     <defs>
-      <pattern id={id} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <pattern
+        id={id}
+        width="6"
+        height="6"
+        patternUnits="userSpaceOnUse"
+        patternTransform="rotate(45)"
+      >
         <rect width="6" height="6" fill="var(--bg)" />
         <line x1="0" y1="0" x2="0" y2="6" stroke="var(--border)" strokeWidth="2" />
       </pattern>
@@ -225,18 +231,21 @@ export function LineChart({
   series,
   format,
   note,
+  emptyMessage,
 }: {
   title: string;
   description?: string;
   series: readonly ChartSeries[];
   format: (value: number | null) => string;
   note?: ReactNode;
+  /** Replaces the default when the chart has nothing to draw for a reason other than an empty period. */
+  emptyMessage?: string;
 }) {
   const points = series[0]?.points ?? [];
   if (points.length === 0) {
     return (
       <ChartFrame title={title} description={description} note={note}>
-        <p className="muted">No buckets in this period.</p>
+        <p className="muted">{emptyMessage ?? 'No buckets in this period.'}</p>
       </ChartFrame>
     );
   }
@@ -254,7 +263,10 @@ export function LineChart({
   const uncovered = points.filter((point) => point.uncovered).length;
   // Gridlines give the plot a scale to read a point against. Two labels — the maximum and zero —
   // leave everything between them to be estimated against nothing.
-  const gridValues = Array.from({ length: GRID_DIVISIONS }, (_, i) => (max * (i + 1)) / GRID_DIVISIONS);
+  const gridValues = Array.from(
+    { length: GRID_DIVISIONS },
+    (_, i) => (max * (i + 1)) / GRID_DIVISIONS,
+  );
   // Enough bucket labels to locate a point along the axis, thinned so they cannot collide. The
   // last bucket is always labelled, and a label that would crowd it is dropped rather than drawn.
   const labelStep = Math.max(1, Math.ceil(points.length / 6));
@@ -351,11 +363,11 @@ export function LineChart({
                 />
               ))}
               {/*
-                * A run of one point strokes a bare moveto, which draws nothing at all: the value
-                * disappears because its neighbours are absent, which is the misreading the
-                * gaps-are-not-zeros rule exists to prevent. A marker gives every run a form
-                * independent of its length (design.md D1).
-                */}
+               * A run of one point strokes a bare moveto, which draws nothing at all: the value
+               * disappears because its neighbours are absent, which is the misreading the
+               * gaps-are-not-zeros rule exists to prevent. A marker gives every run a form
+               * independent of its length (design.md D1).
+               */}
               {entry.points.map((point, index) =>
                 point.value === null ? null : (
                   <circle
@@ -599,10 +611,10 @@ export function StackedBarChart({
               <title>{`${threshold.label}: ${format(threshold.value)}`}</title>
             </line>
             {/*
-              * Labelled in the axis gutter rather than on the plot: a caption across the plot
-              * lands on top of whichever bucket happens to be there, and the rule's own `<title>`
-              * and the note below carry the full wording.
-              */}
+             * Labelled in the axis gutter rather than on the plot: a caption across the plot
+             * lands on top of whichever bucket happens to be there, and the rule's own `<title>`
+             * and the note below carry the full wording.
+             */}
             <text
               className="chart-axis chart-threshold-label"
               x="4"

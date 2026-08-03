@@ -188,6 +188,20 @@ input[type='date'] {
   font-weight: 600;
 }
 
+/* Chart series selector: same chips as .period, but it sits inside a chart's note slot. */
+.series-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+/* At the selection cap: still legible, but plainly not a link. */
+.chip-disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .period-label {
   color: var(--muted);
   font-size: 0.85rem;
@@ -450,11 +464,7 @@ td.absent {
 }
 
 .chart-key-fill.chart-key-secondary {
-  background-image: repeating-linear-gradient(
-    45deg,
-    var(--surface) 0 1.5px,
-    transparent 1.5px 6px
-  );
+  background-image: repeating-linear-gradient(45deg, var(--surface) 0 1.5px, transparent 1.5px 6px);
   opacity: 0.85;
 }
 

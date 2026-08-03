@@ -35,20 +35,29 @@ import { GranularitySelector } from '@/ui/charts';
 import {
   ChurnChart,
   CommitActivityChart,
+  ContributorThroughputChart,
+  MAX_SELECTED_AUTHORS,
   CycleTimePhaseChart,
   DistributionView,
   ThroughputChart,
   WorkMixView,
 } from '@/ui/metric-charts';
-import { metricDistribution, metricSeries, workMixSeries } from '@/analysis/series';
+import {
+  contributorThroughputSeries,
+  metricDistribution,
+  metricSeries,
+  workMixSeries,
+} from '@/analysis/series';
 import { assignTiers, loadBenchmarkThresholds } from '@/analysis/benchmarks';
 import { loadMetricSettings } from '@/analysis/settings';
 import { loadClassificationSettings } from '@/classification/store';
 import { coverageStart, listCoverage } from '@/repositories/coverage';
 
 /**
- * The team view: aggregates over a team's pull requests for a chosen period. There is
- * deliberately no ranking of team members here or in the API behind it (design.md D10).
+ * The team view: aggregates over a team's pull requests for a chosen period. There is deliberately
+ * no ranking of team members here or in the API behind it (design.md D10). The per-author
+ * throughput chart is the one per-person comparison on this page: merged counts in name order, and
+ * counts only — no latency, size, or churn is broken down per person here.
  */
 export default async function TeamViewPage({
   params,
@@ -60,6 +69,8 @@ export default async function TeamViewPage({
     team?: string;
     granularity?: string;
     churn?: string;
+    /** Comma-separated contributor ids drawn on the per-author throughput chart. */
+    authors?: string;
   }>;
 }) {
   const { workspaceId } = await params;
@@ -179,29 +190,35 @@ export default async function TeamViewPage({
     access.visibleRepositoryIds,
   );
 
-  const [buckets, churnBuckets, sizeDistribution, cycleDistribution, workMix] = await Promise.all([
-    metricSeries(scope, filter, {
-      granularity,
-      settings,
-      coverageStart: status.coverageStart,
-    }),
-    metricSeries(scope, filter, {
-      granularity,
-      settings,
-      // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
-      // marks its own buckets rather than inheriting the pull request coverage start.
-      coverageStart: churnCoverage.start,
-    }),
-    metricDistribution(scope, filter, { metric: 'size', settings }),
-    metricDistribution(scope, filter, { metric: 'cycle_time', settings }),
-    classificationSettings.enabled
-      ? workMixSeries(scope, filter, {
-          granularity,
-          settings,
-          confidenceThreshold: classificationSettings.confidenceThreshold,
-        })
-      : Promise.resolve([]),
-  ]);
+  const [buckets, churnBuckets, sizeDistribution, cycleDistribution, workMix, authorThroughput] =
+    await Promise.all([
+      metricSeries(scope, filter, {
+        granularity,
+        settings,
+        coverageStart: status.coverageStart,
+      }),
+      metricSeries(scope, filter, {
+        granularity,
+        settings,
+        // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
+        // marks its own buckets rather than inheriting the pull request coverage start.
+        coverageStart: churnCoverage.start,
+      }),
+      metricDistribution(scope, filter, { metric: 'size', settings }),
+      metricDistribution(scope, filter, { metric: 'cycle_time', settings }),
+      classificationSettings.enabled
+        ? workMixSeries(scope, filter, {
+            granularity,
+            settings,
+            confidenceThreshold: classificationSettings.confidenceThreshold,
+          })
+        : Promise.resolve([]),
+      contributorThroughputSeries(scope, filter, {
+        granularity,
+        settings,
+        coverageStart: status.coverageStart,
+      }),
+    ]);
 
   // The refactor share over the whole period, so the seeded `refactor_rate` band is read rather
   // than carried. Over the period's lines rather than an average of bucket shares: a quiet week
@@ -226,13 +243,39 @@ export default async function TeamViewPage({
   };
   const benchmarks = assignTiers(period75, thresholds);
   const needsFocusBound = (metric: string): number | null =>
-    thresholds.find(
-      (threshold) => threshold.metric === metric && threshold.tier === 'needs_focus',
-    )?.lowerBound ?? null;
+    thresholds.find((threshold) => threshold.metric === metric && threshold.tier === 'needs_focus')
+      ?.lowerBound ?? null;
   const reworkThreshold = needsFocusBound('rework_rate');
   const refactorThreshold = needsFocusBound('refactor_rate');
 
   const chartQuery = `period=${days}&team=${selectedTeam.id}`;
+
+  // Which authors the per-author chart draws. Ids that no longer appear in the period are dropped
+  // rather than held in the URL, so a link shared across a period change degrades to a valid view
+  // instead of an empty one. With no parameter at all the chart opens on the first few authors in
+  // name order — a default that is arbitrary on purpose, since any other rule would be a ranking.
+  const knownAuthors = new Set(authorThroughput.contributors.map((entry) => entry.contributorId));
+  const requestedAuthors = (query.authors ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter((id) => knownAuthors.has(id));
+  const selectedAuthors = (
+    query.authors === undefined
+      ? authorThroughput.contributors.map((entry) => entry.contributorId)
+      : requestedAuthors
+  ).slice(0, MAX_SELECTED_AUTHORS);
+
+  const authorsHref = (contributorId: string): string => {
+    const next = selectedAuthors.includes(contributorId)
+      ? selectedAuthors.filter((id) => id !== contributorId)
+      : [...selectedAuthors, contributorId];
+    const base = `/w/${workspaceId}?${chartQuery}&granularity=${granularity}&churn=${
+      churnAbsolute ? 'lines' : 'shares'
+    }`;
+    // An empty selection still needs to be expressible, or deselecting the last author would fall
+    // back to the default and redraw the line the viewer just removed.
+    return `${base}&authors=${next.join(',')}`;
+  };
 
   return (
     <main>
@@ -321,6 +364,12 @@ export default async function TeamViewPage({
           buckets={buckets}
           drillThrough={drillThrough}
           benchmark={benchmarks.pr_throughput}
+        />
+        <ContributorThroughputChart
+          data={authorThroughput}
+          selected={selectedAuthors}
+          hrefFor={authorsHref}
+          drillThrough={drillThrough}
         />
         <CycleTimePhaseChart
           buckets={buckets}
