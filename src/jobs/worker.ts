@@ -1,19 +1,18 @@
 /**
- * The worker loop: claim one job, run its handler, record the outcome, repeat.
+ * Executing one job: claim it, run its handler, record the outcome.
  *
  * Nothing here knows what any job does — handlers are registered by type — so sync, analysis, and
  * future producers share one execution, retry, and observability path.
+ *
+ * This module deliberately offers no way to run *many* jobs. Looping over `runOnce` without also
+ * recovering abandoned jobs and firing due scheduled tasks produces a deployment that works until
+ * something is interrupted and then fails silently, so the multi-job entrypoint lives in
+ * `drain.ts`, where those steps cannot be skipped (design D2).
  */
 import type { Database } from '../db/driver';
 import { workspaceScope, type WorkspaceScope } from '../db/scope';
 import { PermanentError, RetryableError } from './errors';
-import {
-  claimNextJob,
-  completeJob,
-  failJob,
-  reclaimStaleJobs,
-  DEFAULT_STALE_LOCK_SECONDS,
-} from './queue';
+import { claimNextJob, completeJob, failJob } from './queue';
 import type { JobPayloads, JobRecord, JobType } from './types';
 
 export interface JobContext<T extends JobType = JobType> {
@@ -34,8 +33,6 @@ export interface WorkerOptions {
   workerId?: string;
   /** Restrict this worker to a subset of job types. */
   types?: readonly JobType[];
-  pollIntervalMs?: number;
-  staleLockSeconds?: number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -47,11 +44,7 @@ export interface JobOutcome {
 
 export class Worker {
   private readonly workerId: string;
-  private readonly pollIntervalMs: number;
-  private readonly staleLockSeconds: number;
   private readonly log: (message: string, fields?: Record<string, unknown>) => void;
-  private running = false;
-  private stopping = false;
 
   constructor(
     private readonly database: Database,
@@ -60,8 +53,6 @@ export class Worker {
   ) {
     this.workerId =
       options.workerId ?? `worker-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
-    this.pollIntervalMs = options.pollIntervalMs ?? 1000;
-    this.staleLockSeconds = options.staleLockSeconds ?? DEFAULT_STALE_LOCK_SECONDS;
     this.log = options.log ?? (() => undefined);
   }
 
@@ -102,52 +93,4 @@ export class Worker {
     }
   }
 
-  /** Drain every runnable job, then return. Used by tests and by one-shot invocations. */
-  async drain(limit = 1000): Promise<JobOutcome[]> {
-    const outcomes: JobOutcome[] = [];
-    for (let i = 0; i < limit; i++) {
-      const outcome = await this.runOnce();
-      if (!outcome) break;
-      outcomes.push(outcome);
-    }
-    return outcomes;
-  }
-
-  async start(): Promise<void> {
-    this.running = true;
-    this.stopping = false;
-    this.log('worker started', { workerId: this.workerId });
-    let sinceSweep = 0;
-    while (!this.stopping) {
-      // Reclaim before claiming, so a restart picks up work its predecessor was holding.
-      if (sinceSweep <= 0) {
-        const reclaimed = await reclaimStaleJobs(this.database, this.staleLockSeconds);
-        if (reclaimed > 0) this.log('reclaimed stale jobs', { count: reclaimed });
-        sinceSweep = 30;
-      }
-      sinceSweep--;
-
-      let outcome: JobOutcome | undefined;
-      try {
-        outcome = await this.runOnce();
-      } catch (error) {
-        this.log('worker loop error', { error: String(error) });
-      }
-      if (!outcome) await sleep(this.pollIntervalMs);
-    }
-    this.running = false;
-    this.log('worker stopped', { workerId: this.workerId });
-  }
-
-  stop(): void {
-    this.stopping = true;
-  }
-
-  get isRunning(): boolean {
-    return this.running;
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
