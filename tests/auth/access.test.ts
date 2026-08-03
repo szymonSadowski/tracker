@@ -22,6 +22,7 @@ import { teamMetrics } from '../../src/analysis/aggregate';
 import { analyzePullRequest } from '../../src/analysis/service';
 import { workspaceScope } from '../../src/db/scope';
 import { invalidatePermissionCache } from '../../src/installations/service';
+import { GitHubAuthError } from '../../src/github/http';
 import type { RepositoryRecord } from '../../src/repositories/store';
 
 const db = databaseFixture();
@@ -278,6 +279,52 @@ describe('workspace access', () => {
     await expect(
       assertMayViewContributor(db(), ownerAccess, colleague.id),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe('a rejected user token', () => {
+  /**
+   * GitHub rejecting the user's own credentials is not the same as the user lacking access, and
+   * must not be flattened into "cannot read" — that would silently render an empty workspace as
+   * though the repositories were private. It propagates so the caller can revoke the session and
+   * send the viewer back through sign-in.
+   */
+  it('propagates rather than reading as "not visible"', async () => {
+    const { workspace, owner } = await fixture();
+    const failing: PermissionChecker = {
+      canRead: async () => {
+        throw new GitHubAuthError('GitHub rejected credentials (401)', 401, 'Bad credentials');
+      },
+    };
+
+    await expect(
+      resolveWorkspaceAccess(db(), {
+        workspaceId: workspace.id,
+        user: {
+          id: owner.id,
+          githubUserId: owner.githubUserId,
+          githubNodeId: owner.githubNodeId,
+          login: owner.login,
+          name: null,
+          avatarUrl: null,
+        },
+        checker: failing,
+        permissionCacheSeconds: 300,
+      }),
+    ).rejects.toBeInstanceOf(GitHubAuthError);
+  });
+
+  it('leaves no usable session once revoked', async () => {
+    const { owner } = await fixture();
+    const session = await createSession(db(), {
+      userId: owner.id,
+      githubToken: 'stale-token',
+      inactivityMinutes: 60,
+    });
+
+    await revokeSession(db(), session.token);
+
+    expect(await resolveSession(db(), session.token, { inactivityMinutes: 60 })).toBeUndefined();
   });
 });
 

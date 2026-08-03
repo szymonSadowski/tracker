@@ -13,7 +13,13 @@ import {
   type PermissionChecker,
   type WorkspaceAccess,
 } from './access';
-import { resolveSession, SESSION_COOKIE, type AuthenticatedSession } from './session';
+import { GitHubAuthError } from '../github/http';
+import {
+  resolveSession,
+  revokeSession,
+  SESSION_COOKIE,
+  type AuthenticatedSession,
+} from './session';
 import { listWorkspacesForUser } from '../workspaces/store';
 
 export async function currentSession(): Promise<AuthenticatedSession | undefined> {
@@ -45,14 +51,29 @@ export async function requireWorkspaceAccess(
 ): Promise<{ access: WorkspaceAccess; session: AuthenticatedSession }> {
   const session = await requireSession();
   const config = loadConfig();
-  const access = await resolveWorkspaceAccess(db(), {
-    workspaceId,
-    user: session.user,
-    checker: checkerFor(session),
-    permissionCacheSeconds: config.auth.permissionCacheSeconds,
-    requireOwner: options.requireOwner,
-  });
-  return { access, session };
+  try {
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId,
+      user: session.user,
+      checker: checkerFor(session),
+      permissionCacheSeconds: config.auth.permissionCacheSeconds,
+      requireOwner: options.requireOwner,
+    });
+    return { access, session };
+  } catch (error) {
+    /**
+     * GitHub rejected the user's own token — revoked, expired, or issued against another app.
+     * The session can no longer answer "may this person read that repository", so it is not a
+     * session any more: revoke it and send them back through sign-in. Letting the 401 propagate
+     * would 500 every workspace page with no way out but clearing the cookie by hand.
+     */
+    if (error instanceof GitHubAuthError) {
+      const token = (await cookies()).get(SESSION_COOKIE)?.value;
+      if (token) await revokeSession(db(), token);
+      throw new AccessDeniedError('Not signed in');
+    }
+    throw error;
+  }
 }
 
 /** The workspaces this user belongs to, for the workspace switcher and the default landing. */

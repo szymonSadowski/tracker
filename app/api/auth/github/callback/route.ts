@@ -24,6 +24,15 @@ export async function GET(request: Request) {
   const [expectedState, returnTo = '/dashboard'] = decodeURIComponent(cookie ?? '').split(':');
 
   if (!code || !state || !expectedState || !safeEquals(state, expectedState)) {
+    // The reason never reaches the URL — it would tell an attacker which half failed — but it is
+    // logged, because "declined" with no server-side detail is undiagnosable.
+    console.warn('[auth] OAuth callback rejected', {
+      hasCode: Boolean(code),
+      hasState: Boolean(state),
+      hasStateCookie: Boolean(expectedState),
+      stateMatches: Boolean(state && expectedState && safeEquals(state, expectedState)),
+      baseUrl: config.auth.baseUrl,
+    });
     return NextResponse.redirect(`${config.auth.baseUrl}/signin?error=declined`);
   }
 
@@ -52,7 +61,12 @@ export async function GET(request: Request) {
     });
     response.cookies.delete(OAUTH_STATE_COOKIE);
     return response;
-  } catch {
+  } catch (error) {
+    console.warn('[auth] OAuth exchange failed', {
+      reason: error instanceof Error ? error.message : String(error),
+      baseUrl: config.auth.baseUrl,
+      redirectUri: `${config.auth.baseUrl}/api/auth/github/callback`,
+    });
     return NextResponse.redirect(`${config.auth.baseUrl}/signin?error=declined`);
   }
 }
