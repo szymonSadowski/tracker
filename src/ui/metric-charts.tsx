@@ -6,6 +6,7 @@
  * hatched and named, absent values are gaps, and a decomposition says how much of the bucket it
  * actually accounts for.
  */
+import Link from 'next/link';
 import type { ReactNode } from 'react';
 import {
   BenchmarkTier,
@@ -17,7 +18,12 @@ import {
 } from './charts';
 import { formatCount, formatDuration, formatNumber, UNAVAILABLE } from './format';
 import type { BenchmarkAssignment } from '../analysis/benchmarks';
-import type { Histogram, MetricBucket, WorkMixBucket } from '../analysis/series';
+import type {
+  ContributorThroughput,
+  Histogram,
+  MetricBucket,
+  WorkMixBucket,
+} from '../analysis/series';
 
 const formatShare = (value: number | null): string =>
   value === null ? UNAVAILABLE : `${Math.round(value * 100)}%`;
@@ -280,9 +286,9 @@ export function ChurnChart({
             </>
           ) : null}
           {/*
-            * Which end is better, attributed to the study rather than presented as a target this
-            * workspace set (spec: "A viewer asks what a high rework share means").
-            */}
+           * Which end is better, attributed to the study rather than presented as a target this
+           * workspace set (spec: "A viewer asks what a high rework share means").
+           */}
           <>
             The published benchmark treats a lower rework share and a lower refactor share as
             better; new code carries no benchmark.{' '}
@@ -428,5 +434,107 @@ export function WorkMixView({
         }
       />
     </>
+  );
+}
+
+/** How many lines can be drawn at once and still be told apart without colour. */
+export const MAX_SELECTED_AUTHORS = 4;
+
+/**
+ * Merged pull requests per bucket, one line per author (spec: analytics-dashboard "Throughput is
+ * available as a series per team member").
+ *
+ * The selector is not a convenience. There are four series encodings, so a fifth line would repeat
+ * a dash pattern already in use and the chart would stop satisfying "readable without relying on
+ * colour alone" — the cap is what keeps the guarantee true rather than nominally declared. Which
+ * lines are shown lives in the URL like every other control on these surfaces, so the chart stays
+ * server-rendered and the view stays linkable.
+ */
+export function ContributorThroughputChart({
+  data,
+  selected,
+  hrefFor,
+  drillThrough,
+}: {
+  data: ContributorThroughput;
+  /** Contributor ids currently drawn, already capped by the caller. */
+  selected: readonly string[];
+  /** The href that toggles one contributor in or out of the selection. */
+  hrefFor: (contributorId: string) => string;
+  drillThrough?: string;
+}) {
+  if (data.contributors.length === 0) {
+    return (
+      <LineChart
+        title="Merged pull requests by author"
+        description="One line per author, counted in the bucket their pull request merged in."
+        series={[]}
+        format={(value) => (value === null ? UNAVAILABLE : formatCount(value))}
+        note="No merged pull requests from a named author in this period."
+      />
+    );
+  }
+
+  const chosen = new Set(selected);
+  const series: ChartSeries[] = data.contributors
+    .filter((contributor) => chosen.has(contributor.contributorId))
+    .map((contributor) => ({
+      name: contributor.name,
+      points: data.buckets.map((bucket, index) => ({
+        label: bucket.label,
+        value: bucket.outsideCoverage ? null : (contributor.points[index] ?? null),
+        uncovered: bucket.outsideCoverage,
+        href: drillThrough
+          ? `${drillThrough}${drillThrough.includes('?') ? '&' : '?'}from=${bucket.start.toISOString()}&to=${bucket.end.toISOString()}&author=${contributor.contributorId}`
+          : undefined,
+      })),
+    }));
+
+  const atCap = chosen.size >= MAX_SELECTED_AUTHORS;
+
+  return (
+    <LineChart
+      title="Merged pull requests by author"
+      // With nothing selected LineChart would report "No buckets in this period", which blames the
+      // period for a choice the viewer just made. An empty selection is a state, not an absence.
+      emptyMessage={chosen.size === 0 ? 'No authors selected.' : undefined}
+      description="One line per author, counted in the bucket their pull request merged in. A gap is a bucket before that person joined the workspace, not a bucket where they merged nothing."
+      series={series}
+      format={(value) => (value === null ? UNAVAILABLE : formatCount(value))}
+      note={
+        <div className="series-picker">
+          <span className="muted">Authors:</span>
+          {data.contributors.map((contributor) => {
+            const on = chosen.has(contributor.contributorId);
+            // A chip that would exceed the cap is rendered as text rather than a link, so the
+            // limit is visible before it is hit instead of a click that silently does nothing.
+            const disabled = !on && atCap;
+            return disabled ? (
+              <span
+                key={contributor.contributorId}
+                className="chip chip-disabled"
+                title={`Deselect an author to add another (limit ${MAX_SELECTED_AUTHORS}).`}
+              >
+                {contributor.name}
+              </span>
+            ) : (
+              <Link
+                key={contributor.contributorId}
+                className={on ? 'chip chip-active' : 'chip'}
+                href={hrefFor(contributor.contributorId)}
+              >
+                {contributor.name}
+              </Link>
+            );
+          })}
+          <span className="muted">
+            {chosen.size} of {data.contributors.length} shown
+            {atCap
+              ? `; ${MAX_SELECTED_AUTHORS} is the limit that keeps the lines distinguishable`
+              : ''}
+          </span>
+        </div>
+      }
+    />
   );
 }

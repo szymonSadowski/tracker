@@ -16,7 +16,12 @@ import {
 } from '../helpers/factories';
 import { workspaceScope } from '../../src/db/scope';
 import { analyzePullRequest } from '../../src/analysis/service';
-import { churnShares, metricDistribution, metricSeries } from '../../src/analysis/series';
+import {
+  churnShares,
+  contributorThroughputSeries,
+  metricDistribution,
+  metricSeries,
+} from '../../src/analysis/series';
 import { assignTier, loadBenchmarkThresholds } from '../../src/analysis/benchmarks';
 import { DEFAULT_METRIC_SETTINGS } from '../../src/analysis/settings';
 import { persistRepositoryCommits } from '../../src/ingest/commits';
@@ -49,7 +54,10 @@ describe('period bucketing', () => {
 
     const series = await metricSeries(
       scope,
-      { period: { start: BASE_TIME, end: at(24 * 3), label: '3 days' }, repositoryIds: [repositoryId] },
+      {
+        period: { start: BASE_TIME, end: at(24 * 3), label: '3 days' },
+        repositoryIds: [repositoryId],
+      },
       { granularity: 'day' },
     );
 
@@ -106,7 +114,10 @@ describe('period bucketing', () => {
 
     const series = await metricSeries(
       scope,
-      { period: { start: BASE_TIME, end: at(48), label: 'two days' }, repositoryIds: [repositoryId] },
+      {
+        period: { start: BASE_TIME, end: at(48), label: 'two days' },
+        repositoryIds: [repositoryId],
+      },
       { granularity: 'day', coverageStart: new Date('2026-05-02T00:00:00Z') },
     );
 
@@ -193,9 +204,20 @@ describe('the contributor denominator', () => {
       [workspaceId, teamA.id, contributor.id, monthStart, midMonth, teamB.id],
     );
 
-    const range = { period: { start: monthStart, end: monthEnd, label: 'May' }, repositoryIds: [repositoryId] };
-    const [inA] = await metricSeries(scope, { ...range, teamId: teamA.id }, { granularity: 'month' });
-    const [inB] = await metricSeries(scope, { ...range, teamId: teamB.id }, { granularity: 'month' });
+    const range = {
+      period: { start: monthStart, end: monthEnd, label: 'May' },
+      repositoryIds: [repositoryId],
+    };
+    const [inA] = await metricSeries(
+      scope,
+      { ...range, teamId: teamA.id },
+      { granularity: 'month' },
+    );
+    const [inB] = await metricSeries(
+      scope,
+      { ...range, teamId: teamB.id },
+      { granularity: 'month' },
+    );
 
     expect(inA!.contributors).toBeCloseTo(0.5, 2);
     expect(inB!.contributors).toBeCloseTo(0.5, 2);
@@ -304,9 +326,9 @@ describe('churn shares', () => {
       expect(share!).toBeLessThanOrEqual(1);
     }
     // No component is the residual that absorbs the drift: the extra unit lands on a remainder.
-    expect([shares.newCode, shares.refactor, shares.rework].filter((s) => s === 0.334)).toHaveLength(
-      1,
-    );
+    expect(
+      [shares.newCode, shares.refactor, shares.rework].filter((s) => s === 0.334),
+    ).toHaveLength(1);
   });
 
   it('sums to the whole across the awkward splits, and keeps an exact one exact', () => {
@@ -393,5 +415,158 @@ describe('distributions', () => {
     expect(histogram.bins.find((bin) => bin.lower === 0)!.count).toBe(1);
     expect(histogram.bins.find((bin) => bin.lower === 10)!.count).toBe(1);
     expect(histogram.bins.find((bin) => bin.lower === 250)!.count).toBe(1);
+  });
+});
+
+describe('per-author throughput', () => {
+  it('returns one series per author, ordered by name and never by output', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    // Seeded so the busiest author sorts last alphabetically: if the ordering ever became
+    // "most merged first", zoe would lead and this assertion would catch it.
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    const zoe = await seedContributor(db(), workspaceId, { login: 'zoe' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    for (const hours of [3, 4, 5]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: zoe.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const result = await contributorThroughputSeries(
+      scope,
+      {
+        period: { start: BASE_TIME, end: at(24), label: 'day' },
+        repositoryIds: [repositoryId],
+      },
+      { granularity: 'day' },
+    );
+
+    expect(result.contributors.map((entry) => entry.login)).toEqual(['ada', 'zoe']);
+    const totals = new Map(
+      result.contributors.map((entry) => [
+        entry.login,
+        entry.points.reduce<number>((sum, point) => sum + (point ?? 0), 0),
+      ]),
+    );
+    expect(totals.get('ada')).toBe(1);
+    expect(totals.get('zoe')).toBe(3);
+    // Every series is aligned to the same bucket list, so index n means the same bucket for all.
+    for (const entry of result.contributors) {
+      expect(entry.points).toHaveLength(result.buckets.length);
+    }
+  });
+
+  it('counts a bucket the author merged nothing in as zero, not as a gap', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    await analyzeAll();
+
+    const result = await contributorThroughputSeries(
+      scope,
+      {
+        period: { start: BASE_TIME, end: at(24 * 3), label: '3 days' },
+        repositoryIds: [repositoryId],
+      },
+      { granularity: 'day' },
+    );
+
+    const ada_ = result.contributors.find((entry) => entry.login === 'ada')!;
+    expect(ada_.points[0]).toBe(1);
+    // A quiet day is a measured zero. Drawing it as a gap would hide inactivity.
+    expect(ada_.points[1]).toBe(0);
+  });
+
+  it('omits an author with no merged pull request in the period', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    await seedContributor(db(), workspaceId, { login: 'idle' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    await analyzeAll();
+
+    const result = await contributorThroughputSeries(
+      scope,
+      { period: { start: BASE_TIME, end: at(24), label: 'day' }, repositoryIds: [repositoryId] },
+      { granularity: 'day' },
+    );
+
+    expect(result.contributors.map((entry) => entry.login)).toEqual(['ada']);
+  });
+});
+
+describe('per-author throughput and tenure', () => {
+  it('draws a bucket before the author joined as a gap, not a zero', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    // Joined on the third day of a four-day window, then merged once.
+    await db().query(
+      `INSERT INTO workspace_memberships (workspace_id, contributor_id, started_at)
+       VALUES ($1, $2, $3)`,
+      [workspaceId, ada.id, at(24 * 2)],
+    );
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(24 * 2 + 3),
+    });
+    await analyzeAll();
+
+    const result = await contributorThroughputSeries(
+      scope,
+      {
+        period: { start: BASE_TIME, end: at(24 * 4), label: '4 days' },
+        repositoryIds: [repositoryId],
+      },
+      { granularity: 'day' },
+    );
+
+    const series = result.contributors.find((entry) => entry.login === 'ada')!;
+    // Buckets wholly before the join are gaps; the bucket they joined in is a real measurement.
+    expect(series.points[0]).toBeNull();
+    expect(series.points[1]).toBeNull();
+    expect(series.points[2]).toBe(1);
+  });
+
+  it('leaves a contributor with no membership row unmasked', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    // seedContributor writes no membership row, which is the shape of a contributor whose tenure
+    // is unknown. Masking on unknown would blank the whole line.
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    await analyzeAll();
+
+    const result = await contributorThroughputSeries(
+      scope,
+      { period: { start: BASE_TIME, end: at(24), label: 'day' }, repositoryIds: [repositoryId] },
+      { granularity: 'day' },
+    );
+
+    const series = result.contributors.find((entry) => entry.login === 'ada')!;
+    expect(series.points.every((point) => point !== null)).toBe(true);
   });
 });

@@ -10,13 +10,15 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import {
   ChurnChart,
+  ContributorThroughputChart,
   CycleTimePhaseChart,
+  MAX_SELECTED_AUTHORS,
   ThroughputChart,
   WorkMixView,
 } from '../../src/ui/metric-charts';
 import { LineChart, StackedBarChart, seriesEncoding } from '../../src/ui/charts';
 import { parseGranularity } from '../../src/ui/format';
-import type { MetricBucket, WorkMixBucket } from '../../src/analysis/series';
+import type { ContributorThroughput, MetricBucket, WorkMixBucket } from '../../src/analysis/series';
 
 const emptySummary = {
   p50: null,
@@ -321,5 +323,72 @@ describe('granularity', () => {
     expect(parseGranularity(undefined, 365)).toBe('month');
     // An unrecognised value falls back rather than erroring.
     expect(parseGranularity('fortnight', 30)).toBe('week');
+  });
+});
+
+describe('per-author throughput chart', () => {
+  const throughput: ContributorThroughput = {
+    buckets: [
+      {
+        start: new Date('2026-05-01T00:00:00Z'),
+        end: new Date('2026-05-02T00:00:00Z'),
+        label: '1 May',
+        outsideCoverage: false,
+      },
+      {
+        start: new Date('2026-05-02T00:00:00Z'),
+        end: new Date('2026-05-03T00:00:00Z'),
+        label: '2 May',
+        outsideCoverage: false,
+      },
+    ],
+    contributors: [
+      { contributorId: 'a', name: 'Ada', login: 'ada', points: [3, 0] },
+      { contributorId: 'b', name: 'Bob', login: 'bob', points: [1, 2] },
+      { contributorId: 'c', name: 'Cyd', login: 'cyd', points: [null, 4] },
+      { contributorId: 'd', name: 'Dee', login: 'dee', points: [2, 2] },
+      { contributorId: 'e', name: 'Eve', login: 'eve', points: [1, 1] },
+    ],
+  };
+
+  it('draws only the selected authors and offers the rest', () => {
+    const html = render(
+      ContributorThroughputChart({
+        data: throughput,
+        selected: ['a', 'b'],
+        hrefFor: (id) => `/w/1?authors=${id}`,
+      }),
+    );
+
+    // Every author is offered in the picker, whether or not their line is drawn.
+    for (const name of ['Ada', 'Bob', 'Cyd', 'Dee', 'Eve']) expect(html).toContain(name);
+    // The value table carries the drawn series and not the undrawn ones.
+    expect(html).toContain('2 of 5 shown');
+  });
+
+  it('stops offering more authors at the cap and says why', () => {
+    const html = render(
+      ContributorThroughputChart({
+        data: throughput,
+        selected: ['a', 'b', 'c', 'd'],
+        hrefFor: (id) => `/w/1?authors=${id}`,
+      }),
+    );
+
+    expect(html).toContain('chip-disabled');
+    expect(html).toContain(`${MAX_SELECTED_AUTHORS} is the limit`);
+  });
+
+  it('reports an empty selection as a choice, not as an empty period', () => {
+    const html = render(
+      ContributorThroughputChart({
+        data: throughput,
+        selected: [],
+        hrefFor: (id) => `/w/1?authors=${id}`,
+      }),
+    );
+
+    expect(html).toContain('No authors selected.');
+    expect(html).not.toContain('No buckets in this period.');
   });
 });

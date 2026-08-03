@@ -12,6 +12,7 @@ import { enqueue } from '../jobs/queue';
 import {
   isBotAccount,
   type NormalizedActor,
+  type NormalizedCommit,
   type NormalizedCommitFiles,
   type NormalizedFile,
   type NormalizedPullRequest,
@@ -167,7 +168,10 @@ async function persistReviewComments(
   workspaceId: string,
   pullRequestId: string,
   comments: readonly NormalizedReviewComment[],
-  options: { complete: boolean; resolveActor: (actor: NormalizedActor | null) => Promise<string | null> },
+  options: {
+    complete: boolean;
+    resolveActor: (actor: NormalizedActor | null) => Promise<string | null>;
+  },
 ): Promise<void> {
   for (const comment of comments) {
     const authorId = await options.resolveActor(comment.author);
@@ -245,6 +249,22 @@ async function persistCommitFiles(
   }
 }
 
+/**
+ * When a commit's work was written, for anchoring coding time and cycle time.
+ *
+ * The author date, not the committer date. Rebase, squash, amend, and cherry-pick all rewrite the
+ * committer date to the moment of the rewrite, so a branch rebased onto the default branch just
+ * before the pull request is opened reports every commit as seconds old. Coding time then measures
+ * the rebase rather than the work — the metric collapses to near zero exactly for the teams that
+ * keep their history tidy.
+ *
+ * The author date survives all four, which is why it is fetched on both ingest paths. It is
+ * nullable in the API, so the committer date remains the fallback rather than the source.
+ */
+function commitAuthoredAt(commit: NormalizedCommit): Date {
+  return commit.authoredAt ?? commit.committedAt;
+}
+
 type ActorResolver = (actor: NormalizedActor | null) => Promise<string | null>;
 
 /** Memoized within one persist call so a contributor appearing many times is upserted once. */
@@ -291,7 +311,8 @@ export async function persistPullRequestFileData(
   db: Queryable,
   options: FileDataOptions,
 ): Promise<void> {
-  const resolveActor = options.resolveActor ?? actorResolver(db, options.workspaceId, options.openedAt);
+  const resolveActor =
+    options.resolveActor ?? actorResolver(db, options.workspaceId, options.openedAt);
 
   if (options.files != null) {
     await persistFiles(db, options.workspaceId, options.pullRequestId, options.files);
@@ -329,12 +350,7 @@ export async function persistPullRequestFileData(
   }
 
   if (options.commitFiles != null) {
-    await persistCommitFiles(
-      db,
-      options.workspaceId,
-      options.pullRequestId,
-      options.commitFiles,
-    );
+    await persistCommitFiles(db, options.workspaceId, options.pullRequestId, options.commitFiles);
   }
 
   if (options.enqueueAnalysis) {
@@ -370,11 +386,10 @@ export async function persistPullRequest(
   };
 
   const authorId = await resolveActor(pr.author);
-  const firstCommitAt = pr.commits.reduce<Date | null>(
-    (earliest, commit) =>
-      earliest === null || commit.committedAt < earliest ? commit.committedAt : earliest,
-    null,
-  );
+  const firstCommitAt = pr.commits.reduce<Date | null>((earliest, commit) => {
+    const at = commitAuthoredAt(commit);
+    return earliest === null || at < earliest ? at : earliest;
+  }, null);
 
   const existing = await db.query<{ id: string }>(
     'SELECT id FROM pull_requests WHERE workspace_id = $1 AND node_id = $2',
