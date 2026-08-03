@@ -67,10 +67,13 @@ export default async function TeamViewPage({
   const { access } = await loadWorkspacePage(workspaceId);
   const scope = workspaceScope(db(), workspaceId);
 
-  const installation = await installationForWorkspace(db(), workspaceId);
-  const repositories = await listRepositories(db(), workspaceId, { inScopeOnly: true });
-  const status = await syncStatus(db(), workspaceId);
-  const teams = await listTeams(scope);
+  // Independent of one another, so issued together (design.md D2).
+  const [installation, repositories, status, teams] = await Promise.all([
+    installationForWorkspace(db(), workspaceId),
+    listRepositories(db(), workspaceId, { inScopeOnly: true }),
+    syncStatus(db(), workspaceId),
+    listTeams(scope),
+  ]);
   const days = parsePeriodDays(query.period);
   const period = periodOfDays(days);
   const isOwner = access.role === 'owner';
@@ -155,63 +158,61 @@ export default async function TeamViewPage({
     repositoryIds: access.visibleRepositoryIds,
     teamId: selectedTeam.id,
   };
-  const metrics = await teamMetrics(scope, filter);
-  const outside = await unassignedActivity(scope, {
-    period,
-    repositoryIds: access.visibleRepositoryIds,
-  });
   const drillThrough = `/w/${workspaceId}/pulls?period=${days}&team=${selectedTeam.id}`;
-
-  // Everything below reads the same rollup layer the tiles above read, so a chart and a tile can
-  // never disagree about the same metric (design.md D3).
-  const settings = await loadMetricSettings(db(), workspaceId);
   const granularity = parseGranularity(query.granularity, days);
   const churnAbsolute = query.churn === 'lines';
-  const coverage = await listCoverage(db(), workspaceId, {
-    repositoryIds: access.visibleRepositoryIds,
-  });
+
+  // Everything below reads the same rollup layer the tiles above read, so a chart and a tile can
+  // never disagree about the same metric (design.md D3). The reads themselves are independent, so
+  // they go in two rounds: what nothing depends on, then what needs the first round's answers.
+  const [metrics, outside, settings, coverage, thresholds, classificationSettings] =
+    await Promise.all([
+      teamMetrics(scope, filter),
+      unassignedActivity(scope, { period, repositoryIds: access.visibleRepositoryIds }),
+      loadMetricSettings(db(), workspaceId),
+      listCoverage(db(), workspaceId, { repositoryIds: access.visibleRepositoryIds }),
+      loadBenchmarkThresholds(db()),
+      loadClassificationSettings(db(), workspaceId),
+    ]);
   const churnCoverage = coverageStart(
     coverage.filter((record) => record.dataClass === 'file_diffs'),
     access.visibleRepositoryIds,
   );
 
-  const buckets = await metricSeries(scope, filter, {
-    granularity,
-    settings,
-    coverageStart: status.coverageStart,
-  });
-  const churnBuckets = await metricSeries(scope, filter, {
-    granularity,
-    settings,
-    // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
-    // marks its own buckets rather than inheriting the pull request coverage start.
-    coverageStart: churnCoverage.start,
-  });
-  const thresholds = await loadBenchmarkThresholds(db());
+  const [buckets, churnBuckets, sizeDistribution, cycleDistribution, workMix] = await Promise.all([
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      coverageStart: status.coverageStart,
+    }),
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
+      // marks its own buckets rather than inheriting the pull request coverage start.
+      coverageStart: churnCoverage.start,
+    }),
+    metricDistribution(scope, filter, { metric: 'size', settings }),
+    metricDistribution(scope, filter, { metric: 'cycle_time', settings }),
+    classificationSettings.enabled
+      ? workMixSeries(scope, filter, {
+          granularity,
+          settings,
+          confidenceThreshold: classificationSettings.confidenceThreshold,
+        })
+      : Promise.resolve([]),
+  ]);
+
   const period75 = {
     cycle_time: metrics.cycleTime.p75,
-    pr_throughput: buckets.length > 0 ? (buckets.at(-1)?.throughputPerContributorDay ?? null) : null,
+    pr_throughput:
+      buckets.length > 0 ? (buckets.at(-1)?.throughputPerContributorDay ?? null) : null,
   };
   const benchmarks = assignTiers(period75, thresholds);
   const reworkThreshold =
     thresholds.find(
       (threshold) => threshold.metric === 'rework_rate' && threshold.tier === 'needs_focus',
     )?.lowerBound ?? null;
-
-  const sizeDistribution = await metricDistribution(scope, filter, { metric: 'size', settings });
-  const cycleDistribution = await metricDistribution(scope, filter, {
-    metric: 'cycle_time',
-    settings,
-  });
-
-  const classificationSettings = await loadClassificationSettings(db(), workspaceId);
-  const workMix = classificationSettings.enabled
-    ? await workMixSeries(scope, filter, {
-        granularity,
-        settings,
-        confidenceThreshold: classificationSettings.confidenceThreshold,
-      })
-    : [];
 
   const chartQuery = `period=${days}&team=${selectedTeam.id}`;
 

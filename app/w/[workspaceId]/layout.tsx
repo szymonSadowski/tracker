@@ -15,8 +15,11 @@ export default async function WorkspaceLayout({
 }) {
   const { workspaceId } = await params;
   const { access } = await loadWorkspacePage(workspaceId);
-  const workspace = await getWorkspace(db(), workspaceId);
-  const workspaces = await workspacesForCurrentUser();
+  // The shell renders on every workspace page, so its two reads go together (design.md D2).
+  const [workspace, workspaces] = await Promise.all([
+    getWorkspace(db(), workspaceId),
+    workspacesForCurrentUser(),
+  ]);
 
   return (
     <div className="shell">

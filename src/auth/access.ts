@@ -61,40 +61,85 @@ export class GitHubPermissionChecker implements PermissionChecker {
 /** Everything visible — for tests and for background jobs that are not acting for a user. */
 export const allowAll: PermissionChecker = { canRead: async () => true };
 
-async function cachedDecision(
+/**
+ * How many permission checks may be in flight against GitHub at once on a cache miss.
+ *
+ * Deliberately low (design.md D1): a workspace with fifty repositories must not open fifty
+ * simultaneous requests, both for GitHub's secondary rate limits and for the connection budget of
+ * a serverless function. Raise it from observed limits, not from impatience.
+ */
+const PERMISSION_CHECK_CONCURRENCY = 5;
+
+/**
+ * One read for the whole repository set. Same triple as the per-repository read it replaces —
+ * workspace, user, repository — and the same expiry rule, so "absent" and "expired" are both
+ * simply missing from the returned map. Dropping a predicate here would widen visibility silently,
+ * which is the failure this codebase most wants to avoid (design.md D1).
+ */
+async function cachedDecisions(
   db: Queryable,
   workspaceId: string,
   userId: string,
-  repositoryId: string,
-): Promise<boolean | undefined> {
-  const { rows } = await db.query<{ can_read: boolean }>(
-    `SELECT can_read FROM repository_permissions
-      WHERE workspace_id = $1 AND user_id = $2 AND repository_id = $3 AND expires_at > now()`,
-    [workspaceId, userId, repositoryId],
+  repositoryIds: readonly string[],
+): Promise<Map<string, boolean>> {
+  if (repositoryIds.length === 0) return new Map();
+  const { rows } = await db.query<{ repository_id: string; can_read: boolean }>(
+    `SELECT repository_id, can_read FROM repository_permissions
+      WHERE workspace_id = $1 AND user_id = $2 AND repository_id = ANY($3::uuid[])
+        AND expires_at > now()`,
+    [workspaceId, userId, [...repositoryIds]],
   );
-  return rows[0]?.can_read;
+  return new Map(rows.map((row) => [row.repository_id, row.can_read]));
 }
 
-async function cacheDecision(
+/** One write for every newly-decided row. */
+async function cacheDecisions(
   db: Queryable,
   input: {
     workspaceId: string;
     userId: string;
-    repositoryId: string;
-    canRead: boolean;
+    decisions: ReadonlyArray<{ repositoryId: string; canRead: boolean }>;
     ttlSeconds: number;
   },
 ): Promise<void> {
+  if (input.decisions.length === 0) return;
   await db.query(
     `INSERT INTO repository_permissions
        (workspace_id, user_id, repository_id, can_read, checked_at, expires_at)
-     VALUES ($1, $2, $3, $4, now(), now() + make_interval(secs => $5::double precision))
+     SELECT $1, $2, decision.repository_id, decision.can_read, now(),
+            now() + make_interval(secs => $5::double precision)
+       FROM unnest($3::uuid[], $4::boolean[]) AS decision (repository_id, can_read)
      ON CONFLICT (workspace_id, user_id, repository_id) DO UPDATE
        SET can_read = EXCLUDED.can_read,
            checked_at = EXCLUDED.checked_at,
            expires_at = EXCLUDED.expires_at`,
-    [input.workspaceId, input.userId, input.repositoryId, input.canRead, input.ttlSeconds],
+    [
+      input.workspaceId,
+      input.userId,
+      input.decisions.map((decision) => decision.repositoryId),
+      input.decisions.map((decision) => decision.canRead),
+      input.ttlSeconds,
+    ],
   );
+}
+
+/** Map with at most `limit` calls in flight. Results keep the input's order; the first rejection
+ * propagates, as the serial loop's would have. */
+async function mapBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 export interface ResolveAccessOptions {
@@ -122,26 +167,32 @@ export async function resolveWorkspaceAccess(
     inScopeOnly: true,
   });
 
-  const visible: RepositoryRecord[] = [];
-  for (const repository of repositories) {
-    const cached = await cachedDecision(
-      database,
-      options.workspaceId,
-      options.user.id,
-      repository.id,
-    );
-    const canRead = cached ?? (await options.checker.canRead(repository));
-    if (cached === undefined) {
-      await cacheDecision(database, {
-        workspaceId: options.workspaceId,
-        userId: options.user.id,
-        repositoryId: repository.id,
-        canRead,
-        ttlSeconds: options.permissionCacheSeconds,
-      });
-    }
-    if (canRead) visible.push(repository);
-  }
+  /**
+   * Two round trips, not one per repository (spec: auth-and-access-control, design.md D1): read
+   * every cached decision at once, resolve only the misses against GitHub — concurrently, under a
+   * bound — and write those back at once.
+   */
+  const cached = await cachedDecisions(
+    database,
+    options.workspaceId,
+    options.user.id,
+    repositories.map((repository) => repository.id),
+  );
+  const misses = repositories.filter((repository) => !cached.has(repository.id));
+  const resolved = await mapBounded(misses, PERMISSION_CHECK_CONCURRENCY, async (repository) => ({
+    repositoryId: repository.id,
+    canRead: await options.checker.canRead(repository),
+  }));
+  await cacheDecisions(database, {
+    workspaceId: options.workspaceId,
+    userId: options.user.id,
+    decisions: resolved,
+    ttlSeconds: options.permissionCacheSeconds,
+  });
+
+  const decisions = new Map(cached);
+  for (const decision of resolved) decisions.set(decision.repositoryId, decision.canRead);
+  const visible = repositories.filter((repository) => decisions.get(repository.id) === true);
 
   return {
     workspaceId: options.workspaceId,
