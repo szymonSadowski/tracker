@@ -415,23 +415,81 @@ td.absent {
   gap: 0.4rem;
 }
 
-/* Each series carries a pattern as well as a label, so colour is never the only distinction. */
+/*
+ * Each series carries a non-colour encoding as well as a label, and the swatch shows the encoding
+ * that series' marks actually carry: a line for a stroked chart, a filled texture for an area one.
+ * The two used to disagree — dashed borders in the legend, opacity steps on the bars — so a legend
+ * entry named a series without identifying a mark.
+ */
 .chart-key {
   width: 1.6rem;
+}
+
+.chart-key-line {
   height: 0;
   border-top: 2px solid var(--accent);
 }
 
-.chart-key-dashed {
+.chart-key-line.chart-key-secondary {
   border-top-style: dashed;
 }
 
-.chart-key-dotted {
+.chart-key-line.chart-key-tertiary {
   border-top-style: dotted;
 }
 
-.chart-key-dashdot {
+.chart-key-line.chart-key-quaternary {
   border-top-style: double;
+}
+
+.chart-key-fill {
+  height: 0.8rem;
+  border: 1px solid var(--border);
+  background-color: var(--accent);
+  background-repeat: repeat;
+}
+
+.chart-key-fill.chart-key-secondary {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--surface) 0 1.5px,
+    transparent 1.5px 6px
+  );
+  opacity: 0.85;
+}
+
+.chart-key-fill.chart-key-tertiary {
+  background-image:
+    repeating-linear-gradient(45deg, var(--surface) 0 1.2px, transparent 1.2px 6px),
+    repeating-linear-gradient(-45deg, var(--surface) 0 1.2px, transparent 1.2px 6px);
+  opacity: 0.7;
+}
+
+.chart-key-fill.chart-key-quaternary {
+  background-image: radial-gradient(var(--surface) 1.6px, transparent 1.7px);
+  background-size: 6px 6px;
+  opacity: 0.55;
+}
+
+/*
+ * A published threshold drawn on the plot, so a bucket's height can be read against it rather than
+ * only described in the note below (design.md D5).
+ */
+/* A scale to read a point against, kept lighter than the data it sits behind. */
+.chart-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+
+.chart-threshold {
+  stroke: var(--warn);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.chart-threshold-label {
+  fill: var(--warn);
 }
 
 .benchmark-tier {

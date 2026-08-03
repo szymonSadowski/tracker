@@ -16,7 +16,7 @@ import {
 } from '../helpers/factories';
 import { workspaceScope } from '../../src/db/scope';
 import { analyzePullRequest } from '../../src/analysis/service';
-import { metricDistribution, metricSeries } from '../../src/analysis/series';
+import { churnShares, metricDistribution, metricSeries } from '../../src/analysis/series';
 import { assignTier, loadBenchmarkThresholds } from '../../src/analysis/benchmarks';
 import { DEFAULT_METRIC_SETTINGS } from '../../src/analysis/settings';
 import { persistRepositoryCommits } from '../../src/ingest/commits';
@@ -284,6 +284,46 @@ describe('commit activity', () => {
     );
 
     expect(bucket!.commits).toBe(2);
+  });
+});
+
+/**
+ * `pr-metrics`: the three shares sum to the whole at the precision they are reported in. Rounding
+ * each independently breaks that for any split that does not divide evenly (design.md D4).
+ */
+describe('churn shares', () => {
+  const sum = (shares: ReturnType<typeof churnShares>) =>
+    (shares.newCode ?? 0) + (shares.refactor ?? 0) + (shares.rework ?? 0);
+
+  it('sums to exactly the whole for a split that does not divide evenly', () => {
+    const shares = churnShares(100, 100, 100);
+
+    expect(sum(shares)).toBe(1);
+    for (const share of [shares.newCode, shares.refactor, shares.rework]) {
+      expect(share).not.toBeNull();
+      expect(share!).toBeLessThanOrEqual(1);
+    }
+    // No component is the residual that absorbs the drift: the extra unit lands on a remainder.
+    expect([shares.newCode, shares.refactor, shares.rework].filter((s) => s === 0.334)).toHaveLength(
+      1,
+    );
+  });
+
+  it('sums to the whole across the awkward splits, and keeps an exact one exact', () => {
+    for (const parts of [
+      [1, 1, 1],
+      [7, 11, 13],
+      [999, 1, 0],
+      [1, 0, 0],
+      [2, 1, 0],
+    ] as const) {
+      expect(sum(churnShares(parts[0], parts[1], parts[2]))).toBe(1);
+    }
+    expect(churnShares(200, 0, 0)).toEqual({ newCode: 1, refactor: 0, rework: 0 });
+  });
+
+  it('leaves a bucket with no changed lines absent rather than zero', () => {
+    expect(churnShares(0, 0, 0)).toEqual({ newCode: null, refactor: null, rework: null });
   });
 });
 

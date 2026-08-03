@@ -30,7 +30,15 @@ the harder version to bypass.
   is ordered by merge/open time, never by cycle time, so scanning it cannot produce an implicit
   ranking. Absent metrics render as "Not available" in a muted style, never as `0`.
 - **Personal view** (`/w/[id]/me`) — one's own work only, with a trend against one's own previous
-  period. Reachable only for oneself.
+  period. Reachable only for oneself. Its charts **withhold benchmark tiers, benchmark bands, and
+  the needs-focus thresholds by rule**: a published tier is an industry norm, and the only
+  comparison offered to an individual is against their own previous period. The same metrics carry
+  their tiers on the team view, where the subject is a team rather than a person. The withholding
+  is not an omission to be tidied up later — `tests/surfaces/dignity.test.ts` fails if a personal
+  surface passes a `benchmark`, `reworkThreshold`, or `refactorThreshold` into a chart, or renders
+  a `BenchmarkTier`. Everything neutral the team view shows, the personal view does show:
+  drill-through to one's own pull requests, the churn coverage statement, and the shares/lines
+  toggle.
 - **Contributor detail** (`/w/[id]/people/[contributorId]`) — restricted to workspace owners and
   the contributor themselves; a member requesting a colleague's page gets the same 404 as for a
   contributor that does not exist.

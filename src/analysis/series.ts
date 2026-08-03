@@ -65,6 +65,55 @@ export interface ChurnSummary {
   usedRecencyEstimate: boolean;
 }
 
+/** The precision the three churn shares are reported at, and the unit they are rounded in. */
+const SHARE_UNITS = 1000;
+
+/**
+ * The three churn shares, rounded together rather than each on its own (design.md D4).
+ *
+ * `pr-metrics` requires that the three sum to the whole *at the precision they are reported in*,
+ * so that a consumer may rely on the sum without re-deriving it from the line counts. Rounding
+ * each independently does not preserve a sum — an even three-way split reports 0.333 three times
+ * and loses a thousandth, and other splits gain one, which a chart scaled to the observed total
+ * then reads as a ceiling of 2.
+ *
+ * Largest remainder distributes the leftover units to the components that were truncated hardest,
+ * rather than deriving one component as `1 - a - b`: that would make one of the three the residual
+ * that silently absorbs every rounding error, and rework — the benchmarked one — must not be the
+ * place the drift lands.
+ *
+ * Absent stays absent: a bucket with no changed lines has no composition, not a zero one.
+ */
+export function churnShares(
+  newCodeLines: number,
+  refactorLines: number,
+  reworkLines: number,
+): { newCode: number | null; refactor: number | null; rework: number | null } {
+  const parts = [newCodeLines, refactorLines, reworkLines];
+  const total = parts.reduce((sum, value) => sum + value, 0);
+  if (total <= 0) return { newCode: null, refactor: null, rework: null };
+
+  const exact = parts.map((value) => (value / total) * SHARE_UNITS);
+  const units = exact.map(Math.floor);
+  let remaining = SHARE_UNITS - units.reduce((sum, value) => sum + value, 0);
+
+  // Ties go to the earlier component, so the same line counts always report the same shares.
+  const byRemainder = exact
+    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
+    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
+  for (const entry of byRemainder) {
+    if (remaining <= 0) break;
+    units[entry.index]! += 1;
+    remaining -= 1;
+  }
+
+  return {
+    newCode: units[0]! / SHARE_UNITS,
+    refactor: units[1]! / SHARE_UNITS,
+    rework: units[2]! / SHARE_UNITS,
+  };
+}
+
 export interface MetricBucket {
   start: Date;
   end: Date;
@@ -227,12 +276,11 @@ export async function metricSeries(
     ) as Record<LatencyMetric, DistributionSummary>;
 
     const churnContributing = Number(row.churn_count ?? 0);
-    const churnTotal =
-      Number(row.new_code_lines ?? 0) +
-      Number(row.refactor_lines ?? 0) +
-      Number(row.rework_lines ?? 0);
-    const share = (value: number): number | null =>
-      churnTotal === 0 ? null : Math.round((value / churnTotal) * 1000) / 1000;
+    const shares = churnShares(
+      Number(row.new_code_lines ?? 0),
+      Number(row.refactor_lines ?? 0),
+      Number(row.rework_lines ?? 0),
+    );
 
     return {
       start,
@@ -263,9 +311,9 @@ export async function metricSeries(
               refactorLines: Number(row.refactor_lines ?? 0),
               reworkLines: Number(row.rework_lines ?? 0),
               excludedLines: Number(row.churn_excluded_lines ?? 0),
-              newCodeShare: share(Number(row.new_code_lines ?? 0)),
-              refactorShare: share(Number(row.refactor_lines ?? 0)),
-              reworkShare: share(Number(row.rework_lines ?? 0)),
+              newCodeShare: shares.newCode,
+              refactorShare: shares.refactor,
+              reworkShare: shares.rework,
               contributing: churnContributing,
               excluded: Math.max(0, mergedCount - churnContributing),
               usedRecencyEstimate: Boolean(row.churn_estimated),

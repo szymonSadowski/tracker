@@ -30,24 +30,48 @@ export interface ChartSeries {
 }
 
 /**
- * Four visually distinct patterns. Each series gets a pattern *and* a label, so a viewer who
- * cannot distinguish the colours can still tell the series apart (spec: "Charts are readable
- * without relying on color alone").
+ * One encoding per series, consumed by the marks *and* by the legend (design.md D2).
+ *
+ * The legend used to describe series by border-style while the bars distinguished them by fill
+ * opacity, so nothing connected a legend entry to a segment. One descriptor is what keeps them
+ * from drifting apart again: `key` names the encoding in both the mark's class and the swatch's,
+ * so the correspondence is assertable rather than a matter of two files agreeing by habit.
+ *
+ * Opacity is kept *underneath* the texture rather than replaced by it: a sliver too small to show
+ * a texture still differs in lightness. Lightness alone was the bug; lightness as a fallback is
+ * not (spec: "Charts are readable without relying on color alone").
  */
-export const SERIES_PATTERNS = ['solid', 'dashed', 'dotted', 'dashdot'] as const;
+export interface SeriesEncoding {
+  /** Names the encoding in `chart-mark-<key>` and `chart-key-<key>`. */
+  key: string;
+  /** Stroke dash for line marks and for the legend's line swatch. */
+  dash?: string;
+  /** Suffix of the per-chart `<pattern>` id that fills area marks. */
+  texture: 'plain' | 'diagonal' | 'cross' | 'dots';
+  opacity: number;
+}
 
-export type SeriesPattern = (typeof SERIES_PATTERNS)[number];
+export const SERIES_ENCODINGS: readonly SeriesEncoding[] = [
+  { key: 'primary', texture: 'plain', opacity: 1 },
+  { key: 'secondary', dash: '6 3', texture: 'diagonal', opacity: 0.85 },
+  { key: 'tertiary', dash: '1 3', texture: 'cross', opacity: 0.7 },
+  { key: 'quaternary', dash: '8 3 2 3', texture: 'dots', opacity: 0.55 },
+];
 
-const DASH_ARRAYS: Record<SeriesPattern, string | undefined> = {
-  solid: undefined,
-  dashed: '6 3',
-  dotted: '1 3',
-  dashdot: '8 3 2 3',
-};
+/** The encoding for the nth series, wrapping so a chart with more series still draws. */
+export function seriesEncoding(index: number): SeriesEncoding {
+  return SERIES_ENCODINGS[index % SERIES_ENCODINGS.length]!;
+}
+
+/** Whether a chart's marks are strokes or fills, so its legend can show the same thing. */
+export type LegendKind = 'line' | 'fill';
 
 const VIEW_WIDTH = 720;
 const VIEW_HEIGHT = 220;
 const PADDING = { top: 12, right: 12, bottom: 28, left: 44 };
+
+/** Horizontal gridlines above the baseline, each carrying its value in the axis gutter. */
+const GRID_DIVISIONS = 4;
 
 function niceMax(values: readonly number[]): number {
   const max = Math.max(0, ...values);
@@ -100,17 +124,30 @@ function ValueTable({
   );
 }
 
-function Legend({ series }: { series: readonly ChartSeries[] }) {
+/**
+ * The legend, in the encoding the chart's marks actually carry: a line swatch for a chart drawn
+ * with strokes, a filled and textured swatch for one drawn with areas (spec: "A viewer matches a
+ * legend entry to a mark").
+ */
+function Legend({ series, kind }: { series: readonly ChartSeries[]; kind: LegendKind }) {
   return (
     <ul className="chart-legend">
       {series.map((entry, index) => (
         <li key={entry.name}>
-          <span className={`chart-key chart-key-${SERIES_PATTERNS[index % 4]}`} aria-hidden="true" />
+          <span
+            className={`chart-key chart-key-${kind} chart-key-${seriesEncoding(index).key}`}
+            aria-hidden="true"
+          />
           {entry.name}
         </li>
       ))}
     </ul>
   );
+}
+
+/** SVG ids have to be unique within the document, so every chart namespaces its own. */
+function chartId(title: string): string {
+  return title.replace(/\W+/g, '-').toLowerCase();
 }
 
 /** The hatch uncovered buckets are filled with, defined once per chart. */
@@ -121,6 +158,38 @@ function Hatch({ id }: { id: string }) {
         <rect width="6" height="6" fill="var(--bg)" />
         <line x1="0" y1="0" x2="0" y2="6" stroke="var(--border)" strokeWidth="2" />
       </pattern>
+    </defs>
+  );
+}
+
+/**
+ * The series textures area marks are filled with, namespaced per chart as the hatch is. A genuine
+ * texture survives greyscale and low-vision viewing in a way three steps of one accent's lightness
+ * does not.
+ */
+function SeriesTextures({ prefix }: { prefix: string }) {
+  return (
+    <defs>
+      {SERIES_ENCODINGS.map((encoding) => (
+        <pattern
+          key={encoding.key}
+          id={`${prefix}-${encoding.texture}`}
+          width="6"
+          height="6"
+          patternUnits="userSpaceOnUse"
+        >
+          <rect width="6" height="6" fill="var(--accent)" />
+          {encoding.texture === 'diagonal' ? (
+            <path d="M0,6 L6,0" stroke="var(--surface)" strokeWidth="1.5" />
+          ) : null}
+          {encoding.texture === 'cross' ? (
+            <path d="M0,6 L6,0 M0,0 L6,6" stroke="var(--surface)" strokeWidth="1.2" />
+          ) : null}
+          {encoding.texture === 'dots' ? (
+            <circle cx="3" cy="3" r="1.6" fill="var(--surface)" />
+          ) : null}
+        </pattern>
+      ))}
     </defs>
   );
 }
@@ -181,8 +250,21 @@ export function LineChart({
   const step = points.length === 1 ? plotWidth : plotWidth / (points.length - 1);
   const x = (index: number) => PADDING.left + index * step;
   const y = (value: number) => PADDING.top + plotHeight - (value / max) * plotHeight;
-  const hatchId = `hatch-${title.replace(/\W+/g, '-').toLowerCase()}`;
+  const hatchId = `hatch-${chartId(title)}`;
   const uncovered = points.filter((point) => point.uncovered).length;
+  // Gridlines give the plot a scale to read a point against. Two labels — the maximum and zero —
+  // leave everything between them to be estimated against nothing.
+  const gridValues = Array.from({ length: GRID_DIVISIONS }, (_, i) => (max * (i + 1)) / GRID_DIVISIONS);
+  // Enough bucket labels to locate a point along the axis, thinned so they cannot collide. The
+  // last bucket is always labelled, and a label that would crowd it is dropped rather than drawn.
+  const labelStep = Math.max(1, Math.ceil(points.length / 6));
+  const labelled = points
+    .map((_, index) => index)
+    .filter(
+      (index) =>
+        index === points.length - 1 ||
+        (index % labelStep === 0 && points.length - 1 - index > labelStep / 2),
+    );
 
   return (
     <ChartFrame
@@ -213,6 +295,20 @@ export function LineChart({
             />
           ) : null,
         )}
+        {gridValues.map((value) => (
+          <g key={`g-${value}`}>
+            <line
+              className="chart-grid"
+              x1={PADDING.left}
+              y1={y(value)}
+              x2={VIEW_WIDTH - PADDING.right}
+              y2={y(value)}
+            />
+            <text x="4" y={y(value) + 4} className="chart-axis">
+              {format(value)}
+            </text>
+          </g>
+        ))}
         <line
           x1={PADDING.left}
           y1={PADDING.top + plotHeight}
@@ -220,14 +316,12 @@ export function LineChart({
           y2={PADDING.top + plotHeight}
           stroke="var(--border)"
         />
-        <text x="4" y={PADDING.top + 8} className="chart-axis">
-          {format(max)}
-        </text>
-        <text x="4" y={PADDING.top + plotHeight} className="chart-axis">
+        <text x="4" y={PADDING.top + plotHeight + 4} className="chart-axis">
           0
         </text>
 
         {series.map((entry, seriesIndex) => {
+          const encoding = seriesEncoding(seriesIndex);
           // Each run of consecutive present values is its own path: the break between runs is the
           // gap, and it is a gap by construction rather than by styling.
           const runs: string[] = [];
@@ -242,17 +336,41 @@ export function LineChart({
           });
           if (current.length > 0) runs.push(current.join(' '));
 
-          return runs.map((path, runIndex) => (
-            <path
-              key={`${entry.name}-${runIndex}`}
-              d={path}
-              fill="none"
-              stroke="var(--accent)"
-              strokeWidth={2}
-              strokeDasharray={DASH_ARRAYS[SERIES_PATTERNS[seriesIndex % 4]!]}
-              opacity={1 - seriesIndex * 0.2}
-            />
-          ));
+          return (
+            <g key={entry.name}>
+              {runs.map((path, runIndex) => (
+                <path
+                  key={`${entry.name}-${runIndex}`}
+                  className={`chart-mark chart-mark-${encoding.key}`}
+                  d={path}
+                  fill="none"
+                  stroke="var(--accent)"
+                  strokeWidth={2}
+                  strokeDasharray={encoding.dash}
+                  opacity={encoding.opacity}
+                />
+              ))}
+              {/*
+                * A run of one point strokes a bare moveto, which draws nothing at all: the value
+                * disappears because its neighbours are absent, which is the misreading the
+                * gaps-are-not-zeros rule exists to prevent. A marker gives every run a form
+                * independent of its length (design.md D1).
+                */}
+              {entry.points.map((point, index) =>
+                point.value === null ? null : (
+                  <circle
+                    key={`${entry.name}-p-${point.label}`}
+                    className={`chart-mark chart-mark-${encoding.key}`}
+                    cx={x(index)}
+                    cy={y(point.value)}
+                    r={3}
+                    fill="var(--accent)"
+                    opacity={encoding.opacity}
+                  />
+                ),
+              )}
+            </g>
+          );
         })}
 
         {points.map((point, index) =>
@@ -272,23 +390,39 @@ export function LineChart({
           ) : null,
         )}
 
-        <text x={PADDING.left} y={VIEW_HEIGHT - 8} className="chart-axis">
-          {points[0]!.label}
-        </text>
-        <text
-          x={VIEW_WIDTH - PADDING.right}
-          y={VIEW_HEIGHT - 8}
-          textAnchor="end"
-          className="chart-axis"
-        >
-          {points.at(-1)!.label}
-        </text>
+        {labelled.map((index) => (
+          <text
+            key={`x-${points[index]!.label}`}
+            x={x(index)}
+            y={VIEW_HEIGHT - 8}
+            textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}
+            className="chart-axis"
+          >
+            {points[index]!.label}
+          </text>
+        ))}
       </svg>
-      <Legend series={series} />
+      <Legend series={series} kind="line" />
       <ValueTable caption={`${title} by bucket`} series={series} format={format} />
     </ChartFrame>
   );
 }
+
+/** A reference line drawn across a plot, and the buckets it judges (design.md D5). */
+export interface ChartThreshold {
+  value: number;
+  /** Names what the line is, for the `<title>` a pointer reveals. */
+  label: string;
+  /** Bucket labels at or above the threshold; each gets a marker on the bucket itself. */
+  marked?: readonly string[];
+}
+
+/**
+ * A nonzero segment never renders shorter than this. A 0px band is indistinguishable from an
+ * absent one, and "absent is not zero" is the distinction the spec protects; the few pixels this
+ * adds to a stack are bounded and the value table carries the exact figure either way.
+ */
+const MIN_SEGMENT_HEIGHT = 2;
 
 /**
  * A stacked bar chart — the cycle-time phase decomposition and the churn composition.
@@ -302,12 +436,20 @@ export function StackedBarChart({
   series,
   format,
   note,
+  max,
+  threshold,
 }: {
   title: string;
   description?: string;
   series: readonly ChartSeries[];
   format: (value: number | null) => string;
   note?: ReactNode;
+  /**
+   * The plot's ceiling, where the chart knows it — a share chart's is 1. Inferring it from the
+   * observed totals lets one bucket's rounding drift rescale every other bucket (design.md D3).
+   */
+  max?: number;
+  threshold?: ChartThreshold | null;
 }) {
   const points = series[0]?.points ?? [];
   if (points.length === 0) {
@@ -321,13 +463,29 @@ export function StackedBarChart({
   const totals = points.map((_, index) =>
     series.reduce((sum, entry) => sum + (entry.points[index]?.value ?? 0), 0),
   );
-  const max = niceMax(totals);
+  const ceiling = max ?? niceMax(totals);
   const plotWidth = VIEW_WIDTH - PADDING.left - PADDING.right;
   const plotHeight = VIEW_HEIGHT - PADDING.top - PADDING.bottom;
   const slot = plotWidth / points.length;
   const barWidth = Math.max(2, slot * 0.7);
-  const hatchId = `hatch-${title.replace(/\W+/g, '-').toLowerCase()}`;
+  const id = chartId(title);
+  const hatchId = `hatch-${id}`;
+  const textureId = `texture-${id}`;
   const uncovered = points.filter((point) => point.uncovered).length;
+  const marked = new Set(threshold?.marked ?? []);
+  const y = (value: number) => PADDING.top + plotHeight - (value / ceiling) * plotHeight;
+  const gridValues = Array.from(
+    { length: GRID_DIVISIONS },
+    (_, i) => (ceiling * (i + 1)) / GRID_DIVISIONS,
+  );
+  const labelStep = Math.max(1, Math.ceil(points.length / 6));
+  const labelled = points
+    .map((_, index) => index)
+    .filter(
+      (index) =>
+        index === points.length - 1 ||
+        (index % labelStep === 0 && points.length - 1 - index > labelStep / 2),
+    );
 
   return (
     <ChartFrame
@@ -345,6 +503,22 @@ export function StackedBarChart({
         aria-label={`${title}. The underlying values follow in a table.`}
       >
         <Hatch id={hatchId} />
+        <SeriesTextures prefix={textureId} />
+        {/* Drawn under the bars: a scale to read a segment's height against. */}
+        {gridValues.map((value) => (
+          <g key={`g-${value}`}>
+            <line
+              className="chart-grid"
+              x1={PADDING.left}
+              y1={y(value)}
+              x2={VIEW_WIDTH - PADDING.right}
+              y2={y(value)}
+            />
+            <text x="4" y={y(value) + 4} className="chart-axis">
+              {format(value)}
+            </text>
+          </g>
+        ))}
         {points.map((point, index) => {
           const left = PADDING.left + index * slot + (slot - barWidth) / 2;
           if (point.uncovered) {
@@ -363,20 +537,24 @@ export function StackedBarChart({
           let offset = 0;
           const segments = series.map((entry, seriesIndex) => {
             const value = entry.points[index]?.value;
+            // Absent is drawn as nothing at all; zero is drawn as a zero-height segment. The two
+            // must not converge on the same picture.
             if (value === null || value === undefined) return null;
-            const height = (value / max) * plotHeight;
+            const encoding = seriesEncoding(seriesIndex);
+            const scaled = (value / ceiling) * plotHeight;
+            const height = value === 0 ? 0 : Math.max(MIN_SEGMENT_HEIGHT, scaled);
             const rect = (
               <rect
                 key={`${entry.name}-${point.label}`}
+                className={`chart-mark chart-mark-${encoding.key}`}
                 x={left}
                 y={PADDING.top + plotHeight - offset - height}
                 width={barWidth}
                 height={Math.max(0, height)}
-                fill="var(--accent)"
-                opacity={1 - seriesIndex * 0.25}
+                fill={`url(#${textureId}-${encoding.texture})`}
+                opacity={encoding.opacity}
                 stroke="var(--surface)"
                 strokeWidth={0.5}
-                strokeDasharray={DASH_ARRAYS[SERIES_PATTERNS[seriesIndex % 4]!]}
               >
                 <title>{`${entry.name} · ${point.label}: ${format(value)}`}</title>
               </rect>
@@ -385,7 +563,22 @@ export function StackedBarChart({
             return rect;
           });
 
-          const body = <g key={point.label}>{segments}</g>;
+          const body = (
+            <g key={point.label}>
+              {segments}
+              {marked.has(point.label) ? (
+                // Which bucket, marked on the bucket rather than by a colour change: the rule
+                // below says how far above the threshold it sits (design.md D5).
+                <path
+                  className="chart-bucket-mark"
+                  d={`M${left + barWidth / 2},${PADDING.top + 9} l4,-7 l-8,0 z`}
+                  fill="var(--warn)"
+                >
+                  <title>{`${point.label} is at or above the ${threshold!.label}.`}</title>
+                </path>
+              ) : null}
+            </g>
+          );
           return point.href ? (
             <Link key={`l-${point.label}`} href={point.href}>
               {body}
@@ -394,6 +587,31 @@ export function StackedBarChart({
             body
           );
         })}
+        {threshold ? (
+          <g>
+            <line
+              className="chart-threshold"
+              x1={PADDING.left}
+              y1={PADDING.top + plotHeight - (threshold.value / ceiling) * plotHeight}
+              x2={VIEW_WIDTH - PADDING.right}
+              y2={PADDING.top + plotHeight - (threshold.value / ceiling) * plotHeight}
+            >
+              <title>{`${threshold.label}: ${format(threshold.value)}`}</title>
+            </line>
+            {/*
+              * Labelled in the axis gutter rather than on the plot: a caption across the plot
+              * lands on top of whichever bucket happens to be there, and the rule's own `<title>`
+              * and the note below carry the full wording.
+              */}
+            <text
+              className="chart-axis chart-threshold-label"
+              x="4"
+              y={PADDING.top + plotHeight - (threshold.value / ceiling) * plotHeight - 3}
+            >
+              {format(threshold.value)}
+            </text>
+          </g>
+        ) : null}
         <line
           x1={PADDING.left}
           y1={PADDING.top + plotHeight}
@@ -401,22 +619,22 @@ export function StackedBarChart({
           y2={PADDING.top + plotHeight}
           stroke="var(--border)"
         />
-        <text x="4" y={PADDING.top + 8} className="chart-axis">
-          {format(max)}
+        <text x="4" y={PADDING.top + plotHeight + 4} className="chart-axis">
+          0
         </text>
-        <text x={PADDING.left} y={VIEW_HEIGHT - 8} className="chart-axis">
-          {points[0]!.label}
-        </text>
-        <text
-          x={VIEW_WIDTH - PADDING.right}
-          y={VIEW_HEIGHT - 8}
-          textAnchor="end"
-          className="chart-axis"
-        >
-          {points.at(-1)!.label}
-        </text>
+        {labelled.map((index) => (
+          <text
+            key={`x-${points[index]!.label}`}
+            x={PADDING.left + index * slot + slot / 2}
+            y={VIEW_HEIGHT - 8}
+            textAnchor="middle"
+            className="chart-axis"
+          >
+            {points[index]!.label}
+          </text>
+        ))}
       </svg>
-      <Legend series={series} />
+      <Legend series={series} kind="fill" />
       <ValueTable caption={`${title} by bucket`} series={series} format={format} />
     </ChartFrame>
   );

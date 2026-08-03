@@ -12,6 +12,17 @@ redefinition, not a data problem. Every analysis row records the definition that
 **Churn's rework figure is partly an approximation.** The post-review component is exact; the
 recency component is file-level, and where it contributed the surface says so.
 
+**The churn chart is titled "Change composition", not "Code churn".** It draws three bands, and
+only one of them — rework — is what the industry calls code churn. The old title invited reading
+the new-code band's 95% as a churn figure. The metric family, the columns, and the
+`--family churn` recompute flag keep the name `churn`; the change is to what the chart says.
+
+**Churn share values can differ in the third decimal from before this release.** The three shares
+are now rounded together so that they sum to exactly 1 at the precision they are reported in
+(largest remainder). Previously each was rounded on its own and the three could sum to 1.001,
+which also rescaled the chart's axis to 200%. No stored value changed and no recompute is needed —
+the shares are derived on read.
+
 **Churn coverage lags pull request coverage.** File-level data is filled in for existing history by
 a background pass that runs below incremental sync. Until it catches up, churn charts mark their
 earlier buckets as uncovered rather than drawing them as zero.
@@ -81,7 +92,9 @@ the release rather than left to drift.
 
 ## Churn's recency component is an approximation
 
-Churn splits a merged pull request's changed lines into new code, refactor, and rework. Two of the
+Churn splits a merged pull request's changed lines into new code, refactor, and rework. The
+three-way split is the **change composition**, which is what the chart draws and what the shares
+sum to; **code churn**, as the published studies use the term, is the rework band alone. Two of the
 three components are exact:
 
 - **New code** — additions in an added file, and additions beyond the deletion count in a modified
@@ -102,6 +115,19 @@ than its inputs support.
 
 Churn is **absent, never zero**, for a pull request that has not merged, one whose file data was
 never collected, and one whose file list GitHub truncated.
+
+The three shares are reported to three decimals and **sum to exactly 1** at that precision. They
+are rounded together by largest remainder rather than independently, so no consumer has to
+re-derive the sum from the line counts, and no one component is the residual that absorbs the
+rounding drift.
+
+Two of the three bands carry a published benchmark, and **for both of them the study treats a lower
+share as better**: `rework_rate` and `refactor_rate` in `benchmark_thresholds`, from the LinearB
+community benchmarks. New code carries no benchmark, and none is implied from the other two. Both
+directions are stated on the chart itself and attributed to the study rather than presented as a
+target this workspace set. The needs-focus rework threshold is drawn as a rule on the shares view
+and the buckets at or above it are marked; the refactor threshold is stated in the chart's note and
+its tier is shown, without a second rule on the same plot.
 
 ## Coverage is recorded per class of data
 
