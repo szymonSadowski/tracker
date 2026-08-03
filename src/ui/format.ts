@@ -98,6 +98,22 @@ export function trend(
 
 export const PERIOD_OPTIONS = [7, 30, 90] as const;
 
+export const GRANULARITY_OPTIONS = ['day', 'week', 'month'] as const;
+
+export type Granularity = (typeof GRANULARITY_OPTIONS)[number];
+
+/**
+ * The chart granularity, defaulting to whatever gives a readable number of buckets for the
+ * selected period. Changing it re-buckets the same period; it never changes the period itself
+ * (spec: "A viewer changes granularity").
+ */
+export function parseGranularity(value: string | undefined, days: number): Granularity {
+  if (GRANULARITY_OPTIONS.includes(value as Granularity)) return value as Granularity;
+  if (days <= 14) return 'day';
+  if (days <= 120) return 'week';
+  return 'month';
+}
+
 export function parsePeriodDays(value: string | undefined): number {
   const parsed = Number.parseInt(value ?? '', 10);
   return PERIOD_OPTIONS.includes(parsed as (typeof PERIOD_OPTIONS)[number]) ? parsed : 30;

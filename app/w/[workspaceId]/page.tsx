@@ -28,8 +28,23 @@ import {
   formatDuration,
   formatNumber,
   PERIOD_OPTIONS,
+  parseGranularity,
   parsePeriodDays,
 } from '@/ui/format';
+import { GranularitySelector } from '@/ui/charts';
+import {
+  ChurnChart,
+  CommitActivityChart,
+  CycleTimePhaseChart,
+  DistributionView,
+  ThroughputChart,
+  WorkMixView,
+} from '@/ui/metric-charts';
+import { metricDistribution, metricSeries, workMixSeries } from '@/analysis/series';
+import { assignTiers, loadBenchmarkThresholds } from '@/analysis/benchmarks';
+import { loadMetricSettings } from '@/analysis/settings';
+import { loadClassificationSettings } from '@/classification/store';
+import { coverageStart, listCoverage } from '@/repositories/coverage';
 
 /**
  * The team view: aggregates over a team's pull requests for a chosen period. There is
@@ -40,7 +55,12 @@ export default async function TeamViewPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ period?: string; team?: string }>;
+  searchParams: Promise<{
+    period?: string;
+    team?: string;
+    granularity?: string;
+    churn?: string;
+  }>;
 }) {
   const { workspaceId } = await params;
   const query = await searchParams;
@@ -142,6 +162,59 @@ export default async function TeamViewPage({
   });
   const drillThrough = `/w/${workspaceId}/pulls?period=${days}&team=${selectedTeam.id}`;
 
+  // Everything below reads the same rollup layer the tiles above read, so a chart and a tile can
+  // never disagree about the same metric (design.md D3).
+  const settings = await loadMetricSettings(db(), workspaceId);
+  const granularity = parseGranularity(query.granularity, days);
+  const churnAbsolute = query.churn === 'lines';
+  const coverage = await listCoverage(db(), workspaceId, {
+    repositoryIds: access.visibleRepositoryIds,
+  });
+  const churnCoverage = coverageStart(
+    coverage.filter((record) => record.dataClass === 'file_diffs'),
+    access.visibleRepositoryIds,
+  );
+
+  const buckets = await metricSeries(scope, filter, {
+    granularity,
+    settings,
+    coverageStart: status.coverageStart,
+  });
+  const churnBuckets = await metricSeries(scope, filter, {
+    granularity,
+    settings,
+    // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
+    // marks its own buckets rather than inheriting the pull request coverage start.
+    coverageStart: churnCoverage.start,
+  });
+  const thresholds = await loadBenchmarkThresholds(db());
+  const period75 = {
+    cycle_time: metrics.cycleTime.p75,
+    pr_throughput: buckets.length > 0 ? (buckets.at(-1)?.throughputPerContributorDay ?? null) : null,
+  };
+  const benchmarks = assignTiers(period75, thresholds);
+  const reworkThreshold =
+    thresholds.find(
+      (threshold) => threshold.metric === 'rework_rate' && threshold.tier === 'needs_focus',
+    )?.lowerBound ?? null;
+
+  const sizeDistribution = await metricDistribution(scope, filter, { metric: 'size', settings });
+  const cycleDistribution = await metricDistribution(scope, filter, {
+    metric: 'cycle_time',
+    settings,
+  });
+
+  const classificationSettings = await loadClassificationSettings(db(), workspaceId);
+  const workMix = classificationSettings.enabled
+    ? await workMixSeries(scope, filter, {
+        granularity,
+        settings,
+        confidenceThreshold: classificationSettings.confidenceThreshold,
+      })
+    : [];
+
+  const chartQuery = `period=${days}&team=${selectedTeam.id}`;
+
   return (
     <main>
       <h1>{selectedTeam.name}</h1>
@@ -213,6 +286,66 @@ export default async function TeamViewPage({
 
       <Section title="Change size">
         <SizeDistribution distribution={metrics.sizeDistribution} />
+      </Section>
+
+      <Section
+        title="Trends"
+        aside={
+          <GranularitySelector
+            granularity={granularity}
+            basePath={`/w/${workspaceId}`}
+            query={chartQuery}
+          />
+        }
+      >
+        <ThroughputChart
+          buckets={buckets}
+          drillThrough={drillThrough}
+          benchmark={benchmarks.pr_throughput}
+        />
+        <CycleTimePhaseChart
+          buckets={buckets}
+          drillThrough={drillThrough}
+          benchmark={benchmarks.cycle_time}
+        />
+        <ChurnChart
+          buckets={churnBuckets}
+          drillThrough={drillThrough}
+          absolute={churnAbsolute}
+          toggleHref={`/w/${workspaceId}?${chartQuery}&granularity=${granularity}&churn=${
+            churnAbsolute ? 'shares' : 'lines'
+          }`}
+          coveredFrom={churnCoverage.start}
+          reworkThreshold={reworkThreshold}
+        />
+        <CommitActivityChart
+          buckets={buckets}
+          filterNote={`Across the ${access.visibleRepositories.length} repositories visible to you, for ${selectedTeam.name}.`}
+        />
+      </Section>
+
+      <Section title="Distributions">
+        <DistributionView
+          title="Pull request size"
+          description="Lines changed per merged pull request."
+          histogram={sizeDistribution}
+          format={(value) => formatCount(value === null ? null : Math.round(value))}
+        />
+        <DistributionView
+          title="Cycle time"
+          description="First commit to merge."
+          histogram={cycleDistribution}
+          format={formatDuration}
+        />
+      </Section>
+
+      <Section title="Work mix">
+        <WorkMixView
+          buckets={workMix}
+          enabled={classificationSettings.enabled}
+          drillThrough={drillThrough}
+          settingsHref={isOwner ? `/w/${workspaceId}/settings` : undefined}
+        />
       </Section>
 
       {outside.mergedCount > 0 ? (

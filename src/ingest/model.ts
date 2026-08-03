@@ -54,6 +54,44 @@ export interface NormalizedCommit {
   messageHeadline: string | null;
 }
 
+/** GitHub's changeType, lowercased. 'changed' is REST's name for a mode-only change. */
+export type FileChangeKind = 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed';
+
+export interface NormalizedFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  changeKind: FileChangeKind;
+}
+
+export interface NormalizedReviewComment {
+  nodeId: string;
+  /** The review submission this comment belongs to, when it belongs to one. */
+  reviewNodeId: string | null;
+  author: NormalizedActor | null;
+  submittedAt: Date;
+}
+
+/** Per-commit file statistics — the exact input to the post-review rework component (D2). */
+export interface NormalizedCommitFiles {
+  commitNodeId: string;
+  commitOid: string | null;
+  committedAt: Date;
+  files: NormalizedFile[];
+}
+
+/** A commit on a repository's default branch, ingested independently of any pull request. */
+export interface NormalizedRepositoryCommit {
+  oid: string;
+  nodeId: string | null;
+  author: NormalizedActor | null;
+  committedAt: Date;
+  additions: number | null;
+  deletions: number | null;
+  changedFiles: number | null;
+  messageHeadline: string | null;
+}
+
 export interface NormalizedEvent {
   type: PullRequestEventType;
   occurredAt: Date;
@@ -67,6 +105,8 @@ export interface NormalizedPullRequest {
   nodeId: string;
   number: number;
   title: string;
+  /** The description. Part of the classification input; never used by a deterministic metric. */
+  body: string | null;
   url: string | null;
   state: PullRequestState;
   isDraft: boolean;
@@ -85,6 +125,24 @@ export interface NormalizedPullRequest {
   reviews: NormalizedReview[];
   commits: NormalizedCommit[];
   events: NormalizedEvent[];
+
+  /**
+   * The three collections a path may or may not have fetched. `null` means "this path did not
+   * look", and persistence leaves whatever is stored alone; `[]` means "looked, and there were
+   * none", which is a fact worth writing. Without that distinction a cheap path would silently
+   * erase what an expensive one collected.
+   */
+  files: NormalizedFile[] | null;
+  reviewComments: NormalizedReviewComment[] | null;
+  commitFiles: NormalizedCommitFiles[] | null;
+  /** True when GitHub stopped enumerating files before the list was complete. */
+  filesTruncated: boolean;
+  /**
+   * Whether `reviewComments` is the whole set. Only a complete set may retire stored comments;
+   * the bulk query's per-review page limit makes its set a lower bound, and treating that as
+   * complete would delete comments a fuller pass had already collected.
+   */
+  reviewCommentsComplete?: boolean;
 }
 
 export function isBotAccount(accountType: string | null | undefined): boolean {

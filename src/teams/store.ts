@@ -92,12 +92,22 @@ export async function deleteTeam(scope: WorkspaceScope, teamId: string): Promise
   await scope.query('DELETE FROM teams WHERE workspace_id = :workspace AND id = $1', [teamId]);
 }
 
-/** Assign, reassign, or (with `teamId: null`) unassign a contributor. */
+/**
+ * Assign, reassign, or (with `teamId: null`) unassign a contributor.
+ *
+ * `team_members` says where a contributor is now; `team_memberships` says where they have been.
+ * Both are written here, because a throughput denominator prorated over a bucket needs the
+ * intervals and would otherwise attribute a whole month to whichever team someone ended it in
+ * (design.md D4).
+ */
 export async function assignContributor(
   scope: WorkspaceScope,
   contributorId: string,
   teamId: string | null,
+  at: Date = new Date(),
 ): Promise<void> {
+  await closeOpenTeamMembership(scope, contributorId, at);
+
   if (teamId === null) {
     await scope.query(
       'DELETE FROM team_members WHERE workspace_id = :workspace AND contributor_id = $1',
@@ -105,12 +115,33 @@ export async function assignContributor(
     );
     return;
   }
+
   await scope.query(
     `INSERT INTO team_members (workspace_id, contributor_id, team_id)
      VALUES (:workspace, $1, $2)
      ON CONFLICT (workspace_id, contributor_id)
        DO UPDATE SET team_id = EXCLUDED.team_id, assigned_at = now()`,
     [contributorId, teamId],
+  );
+
+  await scope.query(
+    `INSERT INTO team_memberships (workspace_id, team_id, contributor_id, started_at)
+     VALUES (:workspace, $1, $2, $3)`,
+    [teamId, contributorId, at],
+  );
+}
+
+/** End the contributor's open team interval, so a move is a boundary rather than an overlap. */
+async function closeOpenTeamMembership(
+  scope: WorkspaceScope,
+  contributorId: string,
+  at: Date,
+): Promise<void> {
+  await scope.query(
+    `UPDATE team_memberships
+        SET ended_at = GREATEST(started_at, $2)
+      WHERE workspace_id = :workspace AND contributor_id = $1 AND ended_at IS NULL`,
+    [contributorId, at],
   );
 }
 

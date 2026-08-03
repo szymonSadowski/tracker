@@ -6,7 +6,12 @@
  * write is an upsert keyed by node id (D4).
  */
 import type { Database } from '../db/driver';
-import type { GitHubRestClient } from '../github/rest';
+import type {
+  GitHubRestClient,
+  RestCommit,
+  RestCommitDetail,
+  RestPullRequest,
+} from '../github/rest';
 import type { RateLimitTracker } from '../github/rate-limit';
 import { enqueue } from '../jobs/queue';
 import {
@@ -34,6 +39,33 @@ export interface IncrementalOutcome {
   pullRequests: number;
   windowStart: Date;
   syncedThrough: Date;
+}
+
+/**
+ * How many commits per pull request the incremental path will fetch statistics for. Bounded so a
+ * pull request with a long branch cannot dominate a sync window.
+ */
+export const COMMIT_DETAILS_PER_PULL_REQUEST = 20;
+
+async function fetchCommitFileDetails(
+  deps: IncrementalDeps,
+  repository: { ownerLogin: string; name: string },
+  detail: RestPullRequest,
+  commits: readonly RestCommit[],
+): Promise<RestCommitDetail[]> {
+  const anchor = detail.created_at ? new Date(detail.created_at) : null;
+  const relevant = commits
+    .filter((commit) => {
+      const date = commit.commit.committer?.date ?? commit.commit.author?.date;
+      return date !== undefined && (anchor === null || new Date(date) >= anchor);
+    })
+    .slice(-COMMIT_DETAILS_PER_PULL_REQUEST);
+
+  const details: RestCommitDetail[] = [];
+  for (const commit of relevant) {
+    details.push(await deps.rest.getCommit(repository.ownerLogin, repository.name, commit.sha));
+  }
+  return details;
 }
 
 export async function runIncrementalSync(
@@ -83,18 +115,30 @@ export async function runIncrementalSync(
           break;
         }
         // The list endpoint omits diff statistics, so the detail view is fetched per pull request.
-        const [detail, reviews, commits, timeline] = await Promise.all([
+        // Files and review comments come with it, so this path produces the same normalized
+        // records the GraphQL one does (spec: "All ingestion paths produce identical records").
+        const [detail, reviews, commits, timeline, files, reviewComments] = await Promise.all([
           deps.rest.getPullRequest(repository.ownerLogin, repository.name, summary.number),
           deps.rest.listReviews(repository.ownerLogin, repository.name, summary.number),
           deps.rest.listCommits(repository.ownerLogin, repository.name, summary.number),
           deps.rest.listTimeline(repository.ownerLogin, repository.name, summary.number),
+          deps.rest.listPullRequestFiles(repository.ownerLogin, repository.name, summary.number),
+          deps.rest.listReviewComments(repository.ownerLogin, repository.name, summary.number),
         ]);
+
+        // Per-commit statistics cost one request each, so only the commits a metric is defined
+        // over are fetched: those from the ready-for-review anchor onwards, which is what PR
+        // maturity and the post-review rework component read.
+        const commitFiles = await fetchCommitFileDetails(deps, repository, detail, commits);
 
         const normalized = mapRestPullRequest({
           pullRequest: detail,
           reviews,
           commits,
           timeline,
+          files,
+          reviewComments,
+          commitFiles,
         });
         await database.transaction((tx) =>
           persistPullRequest(tx, {

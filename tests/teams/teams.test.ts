@@ -143,7 +143,12 @@ describe('teams', () => {
     expect((await listTeams(scope))[0]!.name).toBe('Platform & Infra');
   });
 
-  it('moves a contributor’s pull requests to their new team', async () => {
+  /**
+   * A move is a boundary in time, not a rewrite of history: work merged before it stays with the
+   * team it was done in, and work merged after counts for the new one (spec: metric-aggregation
+   * "their pull requests are attributed to the team they belonged to on the merge date").
+   */
+  it('attributes a contributor’s pull requests to the team they were in when each merged', async () => {
     const { workspaceId, repositoryId, scope } = await fixture();
     const contributor = await seedContributor(db(), workspaceId, { login: 'ada' });
     await seedPullRequest(db(), {
@@ -165,15 +170,31 @@ describe('teams', () => {
     });
     expect(beforeA.mergedCount).toBe(1);
 
-    await assignContributor(scope, contributor.id, teamB.id);
+    const movedAt = new Date();
+    await assignContributor(scope, contributor.id, teamB.id, movedAt);
 
+    // The already-merged pull request stays with team A.
     expect(
       (await teamMetrics(scope, { period, repositoryIds: [repositoryId], teamId: teamA.id }))
         .mergedCount,
-    ).toBe(0);
+    ).toBe(1);
+
+    const after = await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: contributor.id,
+      mergedAt: new Date(movedAt.getTime() + 3600_000),
+    });
+    await db().transaction((tx) => analyzePullRequest(tx, after.id));
+
     expect(
-      (await teamMetrics(scope, { period, repositoryIds: [repositoryId], teamId: teamB.id }))
-        .mergedCount,
+      (
+        await teamMetrics(scope, {
+          period: { ...period, end: new Date(movedAt.getTime() + 2 * 3600_000) },
+          repositoryIds: [repositoryId],
+          teamId: teamB.id,
+        })
+      ).mergedCount,
     ).toBe(1);
     // At most one team per contributor.
     const { rows } = await db().query(

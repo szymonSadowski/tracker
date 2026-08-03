@@ -2,22 +2,30 @@
  * Maps REST payloads into the internal representation (design.md D2). Nothing downstream of here
  * knows this data came from REST.
  */
+import { GITHUB_FILE_ENUMERATION_LIMIT } from '../github/graphql';
 import type {
   RestCommit,
+  RestCommitDetail,
+  RestFile,
   RestPullRequest,
   RestReview,
+  RestReviewComment,
   RestTimelineEvent,
   RestUser,
 } from '../github/rest';
+import { mapFileChangeKind } from './graphql-map';
 import {
   deriveReadyForReviewAt,
   parseDate,
   resolveState,
   type NormalizedActor,
   type NormalizedCommit,
+  type NormalizedCommitFiles,
   type NormalizedEvent,
+  type NormalizedFile,
   type NormalizedPullRequest,
   type NormalizedReview,
+  type NormalizedReviewComment,
   type PullRequestEventType,
   type ReviewState,
 } from './model';
@@ -109,11 +117,51 @@ export function mapRestCommit(commit: RestCommit): NormalizedCommit | undefined 
   };
 }
 
+/** REST's `status` and GraphQL's `changeType` map onto the same six kinds (spec: identical records). */
+export function mapRestFile(file: RestFile): NormalizedFile {
+  return {
+    path: file.filename,
+    additions: file.additions ?? 0,
+    deletions: file.deletions ?? 0,
+    changeKind: mapFileChangeKind(file.status),
+  };
+}
+
+export function mapRestReviewComment(
+  comment: RestReviewComment,
+): NormalizedReviewComment | undefined {
+  const submittedAt = parseDate(comment.created_at);
+  if (!submittedAt) return undefined;
+  return {
+    nodeId: comment.node_id,
+    // REST exposes the review's numeric id, not its node id, so the link is left to the GraphQL
+    // path; the comment itself is identical either way.
+    reviewNodeId: null,
+    author: mapRestActor(comment.user),
+    submittedAt,
+  };
+}
+
+export function mapRestCommitFiles(commit: RestCommitDetail): NormalizedCommitFiles | undefined {
+  const committedAt = parseDate(commit.commit.committer?.date ?? commit.commit.author?.date);
+  if (!committedAt) return undefined;
+  return {
+    commitNodeId: commit.node_id ?? commit.sha,
+    commitOid: commit.sha,
+    committedAt,
+    files: (commit.files ?? []).map(mapRestFile),
+  };
+}
+
 export interface RestPullRequestBundle {
   pullRequest: RestPullRequest;
   reviews: readonly RestReview[];
   commits: readonly RestCommit[];
   timeline: readonly RestTimelineEvent[];
+  /** Omitted when this fetch did not ask for files; an empty array means it asked and found none. */
+  files?: readonly RestFile[];
+  reviewComments?: readonly RestReviewComment[];
+  commitFiles?: readonly RestCommitDetail[];
 }
 
 export function mapRestPullRequest(bundle: RestPullRequestBundle): NormalizedPullRequest {
@@ -127,6 +175,7 @@ export function mapRestPullRequest(bundle: RestPullRequestBundle): NormalizedPul
     nodeId: pr.node_id,
     number: pr.number,
     title: pr.title ?? '',
+    body: pr.body ?? null,
     url: pr.html_url ?? null,
     state: resolveState(mergedAt !== null, closedAt),
     isDraft: pr.draft ?? false,
@@ -148,5 +197,23 @@ export function mapRestPullRequest(bundle: RestPullRequestBundle): NormalizedPul
       .map(mapRestCommit)
       .filter((commit): commit is NormalizedCommit => commit !== undefined),
     events,
+    files: bundle.files === undefined ? null : bundle.files.map(mapRestFile),
+    // REST stops enumerating at the same limit GraphQL does; a list that arrives exactly at it is
+    // recorded as truncated rather than assumed to be the whole change.
+    filesTruncated: (bundle.files?.length ?? 0) >= GITHUB_FILE_ENUMERATION_LIMIT,
+    reviewComments:
+      bundle.reviewComments === undefined
+        ? null
+        : bundle.reviewComments
+            .map(mapRestReviewComment)
+            .filter((comment): comment is NormalizedReviewComment => comment !== undefined),
+    // The comments endpoint returns every comment on the pull request, so the set can retire rows.
+    reviewCommentsComplete: bundle.reviewComments !== undefined,
+    commitFiles:
+      bundle.commitFiles === undefined
+        ? null
+        : bundle.commitFiles
+            .map(mapRestCommitFiles)
+            .filter((commit): commit is NormalizedCommitFiles => commit !== undefined),
   };
 }

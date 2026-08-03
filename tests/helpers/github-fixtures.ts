@@ -43,7 +43,16 @@ export function graphqlPullRequest(options: FixtureOptions = {}): GraphQLPullReq
     id: options.nodeId ?? 'PR_1',
     number: options.number ?? 7,
     title: 'Add rate limiting',
+    bodyText: 'Adds a token bucket in front of the public API.',
     url: 'https://github.com/acme/api/pull/7',
+    files: {
+      totalCount: 2,
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [
+        { path: 'src/limiter.ts', additions: 100, deletions: 0, changeType: 'ADDED' },
+        { path: 'src/server.ts', additions: 20, deletions: 30, changeType: 'MODIFIED' },
+      ],
+    },
     isDraft: options.draft ?? false,
     createdAt: iso(options.createdAtHours ?? 0),
     updatedAt: iso(options.updatedAtHours ?? merged ?? 8),
@@ -67,6 +76,20 @@ export function graphqlPullRequest(options: FixtureOptions = {}): GraphQLPullReq
             login: bob.login,
             id: bob.nodeId,
             databaseId: bob.databaseId,
+          },
+          comments: {
+            nodes: [
+              {
+                id: `PRRC_${prNodeId}`,
+                createdAt: iso(4),
+                author: {
+                  __typename: 'User',
+                  login: bob.login,
+                  id: bob.nodeId,
+                  databaseId: bob.databaseId,
+                },
+              },
+            ],
           },
         },
       ],
@@ -120,6 +143,7 @@ export function restPullRequest(options: FixtureOptions = {}): RestPullRequestBu
       node_id: options.nodeId ?? 'PR_1',
       number: options.number ?? 7,
       title: 'Add rate limiting',
+      body: 'Adds a token bucket in front of the public API.',
       state: merged === null ? 'open' : 'closed',
       draft: options.draft ?? false,
       html_url: 'https://github.com/acme/api/pull/7',
@@ -168,6 +192,35 @@ export function restPullRequest(options: FixtureOptions = {}): RestPullRequestBu
         sha: `sha_${prNodeId}`,
         author: { date: iso(1) },
         committer: { date: iso(1) },
+      },
+    ],
+    files: [
+      { filename: 'src/limiter.ts', additions: 100, deletions: 0, status: 'added' },
+      { filename: 'src/server.ts', additions: 20, deletions: 30, status: 'modified' },
+    ],
+    reviewComments: [
+      {
+        id: 5,
+        node_id: `PRRC_${prNodeId}`,
+        user: { id: bob.databaseId, node_id: bob.nodeId, login: bob.login, type: 'User' },
+        created_at: iso(4),
+        pull_request_review_id: 1,
+      },
+    ],
+    commitFiles: [
+      {
+        sha: `sha_${prNodeId}`,
+        node_id: `C_${prNodeId}`,
+        commit: {
+          message: 'Add limiter\n\nDetails follow.',
+          author: { date: iso(1) },
+          committer: { date: iso(1) },
+        },
+        author: { id: ada.databaseId, node_id: ada.nodeId, login: ada.login, type: 'User' },
+        files: [
+          { filename: 'src/limiter.ts', additions: 100, deletions: 0, status: 'added' },
+          { filename: 'src/server.ts', additions: 20, deletions: 30, status: 'modified' },
+        ],
       },
     ],
   };

@@ -163,6 +163,12 @@ export interface SeedPullRequestOptions {
   additions?: number | null;
   deletions?: number | null;
   changedFiles?: number | null;
+  firstCommitAt?: Date | null;
+  filesTruncated?: boolean;
+  /** Set to mark file data as collected; the metrics read absence of this as "never asked". */
+  filesIngestedAt?: Date | null;
+  reviewCommentsIngestedAt?: Date | null;
+  body?: string | null;
 }
 
 export async function seedPullRequest(
@@ -180,8 +186,10 @@ export async function seedPullRequest(
     `INSERT INTO pull_requests
        (workspace_id, repository_id, node_id, number, title, url, state, is_draft,
         author_contributor_id, additions, deletions, changed_files, opened_at,
-        ready_for_review_at, closed_at, merged_at, github_updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+        ready_for_review_at, closed_at, merged_at, github_updated_at,
+        first_commit_at, files_truncated, files_ingested_at, review_comments_ingested_at, body)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+     RETURNING id`,
     [
       options.workspaceId,
       options.repositoryId,
@@ -200,9 +208,112 @@ export async function seedPullRequest(
       options.closedAt ?? mergedAt,
       mergedAt,
       options.githubUpdatedAt ?? mergedAt ?? openedAt,
+      options.firstCommitAt ?? null,
+      options.filesTruncated ?? false,
+      options.filesIngestedAt ?? null,
+      options.reviewCommentsIngestedAt ?? null,
+      options.body ?? null,
     ],
   );
   return { id: rows[0]!.id, nodeId, number };
+}
+
+/**
+ * A changed file. Marks the pull request's file data as collected, since a stored file row and an
+ * uncollected pull request are not a state ingestion can produce.
+ */
+export async function seedFile(
+  db: Queryable,
+  options: {
+    workspaceId: string;
+    pullRequestId: string;
+    path: string;
+    additions?: number;
+    deletions?: number;
+    changeKind?: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed';
+  },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO pr_files (workspace_id, pull_request_id, path, additions, deletions, change_kind)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [
+      options.workspaceId,
+      options.pullRequestId,
+      options.path,
+      options.additions ?? 0,
+      options.deletions ?? 0,
+      options.changeKind ?? 'modified',
+    ],
+  );
+  await db.query(
+    'UPDATE pull_requests SET files_ingested_at = COALESCE(files_ingested_at, now()) WHERE id = $1',
+    [options.pullRequestId],
+  );
+}
+
+export async function seedCommitFile(
+  db: Queryable,
+  options: {
+    workspaceId: string;
+    pullRequestId: string;
+    path: string;
+    committedAt: Date;
+    commitNodeId?: string;
+    additions?: number;
+    deletions?: number;
+    changeKind?: 'added' | 'modified' | 'removed' | 'renamed' | 'copied' | 'changed';
+  },
+): Promise<void> {
+  const n = next();
+  await db.query(
+    `INSERT INTO pr_commit_files
+       (workspace_id, pull_request_id, commit_node_id, commit_oid, path, additions, deletions,
+        change_kind, committed_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [
+      options.workspaceId,
+      options.pullRequestId,
+      options.commitNodeId ?? `C_commit_${n}`,
+      `sha${n}`,
+      options.path,
+      options.additions ?? 0,
+      options.deletions ?? 0,
+      options.changeKind ?? 'modified',
+      options.committedAt,
+    ],
+  );
+}
+
+/** A review comment. Marks comment data as collected, for the same reason `seedFile` does. */
+export async function seedReviewComment(
+  db: Queryable,
+  options: {
+    workspaceId: string;
+    pullRequestId: string;
+    authorContributorId?: string | null;
+    submittedAt: Date;
+    nodeId?: string;
+  },
+): Promise<void> {
+  const n = next();
+  await db.query(
+    `INSERT INTO pr_review_comments
+       (workspace_id, pull_request_id, author_contributor_id, node_id, submitted_at)
+     VALUES ($1,$2,$3,$4,$5)`,
+    [
+      options.workspaceId,
+      options.pullRequestId,
+      options.authorContributorId ?? null,
+      options.nodeId ?? `PRRC_${n}`,
+      options.submittedAt,
+    ],
+  );
+  await db.query(
+    `UPDATE pull_requests
+        SET review_comments_ingested_at = COALESCE(review_comments_ingested_at, now())
+      WHERE id = $1`,
+    [options.pullRequestId],
+  );
 }
 
 export async function seedReview(

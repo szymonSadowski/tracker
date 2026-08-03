@@ -24,10 +24,21 @@ import {
   formatDate,
   formatDuration,
   PERIOD_OPTIONS,
+  parseGranularity,
   parsePeriodDays,
   trend,
   UNAVAILABLE,
 } from '@/ui/format';
+import { GranularitySelector } from '@/ui/charts';
+import {
+  ChurnChart,
+  CommitActivityChart,
+  CycleTimePhaseChart,
+  DistributionView,
+  ThroughputChart,
+} from '@/ui/metric-charts';
+import { metricDistribution, metricSeries } from '@/analysis/series';
+import { loadMetricSettings } from '@/analysis/settings';
 
 /**
  * The personal view: your own pull requests and metrics, compared with your own previous period.
@@ -38,10 +49,10 @@ export default async function PersonalPage({
   searchParams,
 }: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ period?: string }>;
+  searchParams: Promise<{ period?: string; granularity?: string }>;
 }) {
   const { workspaceId } = await params;
-  const { period: periodParam } = await searchParams;
+  const { period: periodParam, granularity: granularityParam } = await searchParams;
   const { access, session } = await loadWorkspacePage(workspaceId);
   const scope = workspaceScope(db(), workspaceId);
 
@@ -79,6 +90,17 @@ export default async function PersonalPage({
   const earlier = await teamMetrics(scope, { ...filter, period: previousPeriod(period) });
   const pullRequests = await listPullRequests(scope, filter, { limit: 50 });
 
+  // The same rollup layer the team view reads, scoped to one contributor: their own values, with
+  // no comparison set (design.md D10).
+  const settings = await loadMetricSettings(db(), workspaceId);
+  const granularity = parseGranularity(granularityParam, days);
+  const buckets = await metricSeries(scope, filter, {
+    granularity,
+    settings,
+    coverageStart: status.coverageStart,
+  });
+  const sizeDistribution = await metricDistribution(scope, filter, { metric: 'size', settings });
+
   const mergedTrend = trend(current.mergedCount, earlier.mergedCount);
   const cycleTrend = trend(current.cycleTime.median, earlier.cycleTime.median);
 
@@ -103,6 +125,28 @@ export default async function PersonalPage({
           format={formatDuration}
         />
       </div>
+
+      <Section
+        title="Your trends"
+        aside={
+          <GranularitySelector
+            granularity={granularity}
+            basePath={`/w/${workspaceId}/me`}
+            query={`period=${days}`}
+          />
+        }
+      >
+        <ThroughputChart buckets={buckets} />
+        <CycleTimePhaseChart buckets={buckets} />
+        <ChurnChart buckets={buckets} />
+        <CommitActivityChart buckets={buckets} filterNote="Your commits on default branches." />
+        <DistributionView
+          title="Your pull request size"
+          description="Lines changed per merged pull request."
+          histogram={sizeDistribution}
+          format={(value) => formatCount(value === null ? null : Math.round(value))}
+        />
+      </Section>
 
       <Section
         title="Your pull requests"

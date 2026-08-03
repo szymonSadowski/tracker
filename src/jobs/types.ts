@@ -4,10 +4,14 @@ export const JOB_TYPES = [
   'repository.backfill',
   'repository.history_sync',
   'repository.incremental_sync',
+  'repository.file_fill_in',
+  'repository.commit_sync',
   'repository.reprocess',
   'workspace.schedule_syncs',
   'pull_request.analyze',
   'workspace.recompute_analysis',
+  'workspace.classify_pull_requests',
+  'workspace.collect_classifications',
   'installation.reconcile_repositories',
 ] as const;
 
@@ -18,6 +22,15 @@ export interface JobPayloads {
   /** `from: null` means all available history (design.md D4). */
   'repository.history_sync': { repositoryId: string; from: string | null };
   'repository.incremental_sync': { repositoryId: string; reason?: 'schedule' | 'on_demand' };
+  /** Fills file, comment, and commit-statistic data for already-ingested pull requests. */
+  'repository.file_fill_in': { repositoryId: string };
+  /** `since`/`until` bound the default-branch history window; `cursor` resumes a paged walk. */
+  'repository.commit_sync': {
+    repositoryId: string;
+    since?: string;
+    until?: string;
+    cursor?: string | null;
+  };
   'repository.reprocess': { repositoryId: string };
   'workspace.schedule_syncs': Record<string, never>;
   'pull_request.analyze': { pullRequestId: string };
@@ -26,6 +39,10 @@ export interface JobPayloads {
     mergedAfter?: string;
     mergedBefore?: string;
   };
+  /** Enqueue a classification batch for the workspace's eligible pull requests. */
+  'workspace.classify_pull_requests': Record<string, never>;
+  /** Ingest a finished classification batch; re-enqueues itself while the batch is running. */
+  'workspace.collect_classifications': { batchId: string };
   'installation.reconcile_repositories': { installationId: string };
 }
 

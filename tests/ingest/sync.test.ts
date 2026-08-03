@@ -239,6 +239,22 @@ class FakeRest {
   async listTimeline(_owner: string, _repo: string, number: number) {
     return this.pages.find((bundle) => bundle.pullRequest.number === number)!.timeline;
   }
+
+  async listPullRequestFiles(_owner: string, _repo: string, number: number) {
+    return this.pages.find((bundle) => bundle.pullRequest.number === number)!.files ?? [];
+  }
+
+  async listReviewComments(_owner: string, _repo: string, number: number) {
+    return this.pages.find((bundle) => bundle.pullRequest.number === number)!.reviewComments ?? [];
+  }
+
+  async getCommit(_owner: string, _repo: string, sha: string) {
+    const detail = this.pages
+      .flatMap((bundle) => bundle.commitFiles ?? [])
+      .find((commit) => commit.sha === sha);
+    if (!detail) throw new Error(`no commit detail for ${sha}`);
+    return detail;
+  }
 }
 
 describe('incremental sync', () => {
