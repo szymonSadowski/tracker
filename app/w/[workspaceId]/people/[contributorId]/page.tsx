@@ -55,9 +55,11 @@ export default async function ContributorPage({
     repositoryIds: access.visibleRepositoryIds,
     contributorId,
   };
-  const metrics = await teamMetrics(scope, filter);
-  const pullRequests = await listPullRequests(scope, filter, { limit: 50 });
-  const status = await syncStatus(db(), workspaceId);
+  const [metrics, pullRequests, status] = await Promise.all([
+    teamMetrics(scope, filter),
+    listPullRequests(scope, filter, { limit: 50 }),
+    syncStatus(db(), workspaceId),
+  ]);
 
   return (
     <main>

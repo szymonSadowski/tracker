@@ -54,9 +54,6 @@ export default async function PullRequestsPage({
    */
   const bucket = parseBucketWindow(query.from, query.to);
   const period = bucket ?? periodOfDays(days);
-  const status = await syncStatus(db(), workspaceId);
-  const teams = await listTeams(scope);
-  const roster = await listRoster(scope);
 
   // A repository filter can only narrow what the viewer may already see.
   const repositoryIds = query.repository
@@ -73,11 +70,18 @@ export default async function PullRequestsPage({
     teamId: query.team ?? null,
     contributorId: query.author,
   };
-  const pullRequests = await listPullRequests(scope, filter, {
-    merged: state === 'merged',
-    state,
-    workType: query.workType,
-  });
+  // None of these four depends on another, so they go together rather than one after another
+  // (design.md D2).
+  const [status, teams, roster, pullRequests] = await Promise.all([
+    syncStatus(db(), workspaceId),
+    listTeams(scope),
+    listRoster(scope),
+    listPullRequests(scope, filter, {
+      merged: state === 'merged',
+      state,
+      workType: query.workType,
+    }),
+  ]);
 
   const link = (overrides: Record<string, string | undefined>) => {
     const next = new URLSearchParams({
@@ -99,9 +103,7 @@ export default async function PullRequestsPage({
       <h1>Pull requests</h1>
       <p className="muted">
         {pullRequests.length} pull request{pullRequests.length === 1 ? '' : 's'}
-        {query.team
-          ? ` for ${teams.find((team) => team.id === query.team)?.name ?? 'team'}`
-          : ''}
+        {query.team ? ` for ${teams.find((team) => team.id === query.team)?.name ?? 'team'}` : ''}
         {query.workType ? ` classified as ${query.workType.replace('_', ' ')}` : ''}{' '}
         {bucket ? `in ${bucket.label}` : `in the last ${days} days`}
       </p>

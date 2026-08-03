@@ -16,8 +16,7 @@ export default async function TeamsPage({ params }: { params: Promise<{ workspac
   await loadWorkspacePage(workspaceId, { requireOwner: true });
   const scope = workspaceScope(db(), workspaceId);
 
-  const teams = await listTeams(scope);
-  const roster = await listRoster(scope);
+  const [teams, roster] = await Promise.all([listTeams(scope), listRoster(scope)]);
   const unassigned = roster.filter((entry) => entry.teamId === null);
 
   return (

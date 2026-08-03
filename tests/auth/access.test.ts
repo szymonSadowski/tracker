@@ -23,7 +23,8 @@ import { analyzePullRequest } from '../../src/analysis/service';
 import { workspaceScope } from '../../src/db/scope';
 import { invalidatePermissionCache } from '../../src/installations/service';
 import { GitHubAuthError } from '../../src/github/http';
-import type { RepositoryRecord } from '../../src/repositories/store';
+import { listRepositories, type RepositoryRecord } from '../../src/repositories/store';
+import type { Database, QueryResult, Transaction } from '../../src/db/driver';
 
 const db = databaseFixture();
 
@@ -279,6 +280,173 @@ describe('workspace access', () => {
     await expect(
       assertMayViewContributor(db(), ownerAccess, colleague.id),
     ).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The access check reads cached decisions for the whole repository set at once rather than one at
+ * a time (spec: auth-and-access-control). Batching is where a dropped `workspace_id` or `user_id`
+ * predicate would widen visibility silently, so these compare the batched result against a check
+ * made one repository at a time, and count the round trips it costs.
+ */
+describe('resolving access in batch', () => {
+  /** Counts every statement so a test can assert the count does not follow workspace size. */
+  class CountingDatabase implements Database {
+    queries = 0;
+
+    constructor(private readonly base: Database) {}
+
+    query<R = Record<string, unknown>>(
+      sql: string,
+      params?: readonly unknown[],
+    ): Promise<QueryResult<R>> {
+      this.queries++;
+      return this.base.query<R>(sql, params);
+    }
+
+    exec(sql: string): Promise<void> {
+      return this.base.exec(sql);
+    }
+
+    transaction<T>(fn: (tx: Transaction) => Promise<T>): Promise<T> {
+      return this.base.transaction(fn);
+    }
+
+    async close(): Promise<void> {
+      // The fixture owns the connection.
+    }
+  }
+
+  async function workspaceOf(repositoryNames: string[]) {
+    const workspace = await seedWorkspace(db());
+    for (const name of repositoryNames) await seedRepository(db(), workspace.id, { name });
+    const member = await seedUser(db());
+    await seedMembership(db(), workspace.id, member.id, 'member');
+    return {
+      workspaceId: workspace.id,
+      user: {
+        id: member.id,
+        githubUserId: member.githubUserId,
+        githubNodeId: member.githubNodeId,
+        login: member.login,
+        name: null,
+        avatarUrl: null,
+      },
+    };
+  }
+
+  /** What the previous implementation would have returned: one check per repository, in order. */
+  async function oneAtATime(workspaceId: string, checker: PermissionChecker): Promise<string[]> {
+    const repositories = await listRepositories(db(), workspaceId, { inScopeOnly: true });
+    const visible: string[] = [];
+    for (const repository of repositories) {
+      if (await checker.canRead(repository)) visible.push(repository.name);
+    }
+    return visible;
+  }
+
+  it('returns exactly what a one-at-a-time check returns, for a mixed permission set', async () => {
+    const names = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta'];
+    const { workspaceId, user } = await workspaceOf(names);
+    const readable = new Set(['alpha', 'gamma', 'zeta']);
+
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId,
+      user,
+      checker: new ScriptedChecker(readable),
+      permissionCacheSeconds: 300,
+    });
+
+    expect(access.visibleRepositories.map((r) => r.name)).toEqual(
+      await oneAtATime(workspaceId, new ScriptedChecker(readable)),
+    );
+    expect(access.visibleRepositories.map((r) => r.name).sort()).toEqual([...readable].sort());
+  });
+
+  it('gives a user permitted none of the repositories an empty set, not everything', async () => {
+    const { workspaceId, user } = await workspaceOf(['one', 'two', 'three']);
+
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId,
+      user,
+      checker: new ScriptedChecker(new Set()),
+      permissionCacheSeconds: 300,
+    });
+
+    expect(access.visibleRepositories).toEqual([]);
+    expect(access.visibleRepositoryIds).toEqual([]);
+  });
+
+  it('never lets one workspace’s cached decision answer for another', async () => {
+    const first = await workspaceOf(['shared-name']);
+    const second = await workspaceOf(['shared-name']);
+    await resolveWorkspaceAccess(db(), {
+      workspaceId: first.workspaceId,
+      user: first.user,
+      checker: allowAll,
+      permissionCacheSeconds: 300,
+    });
+
+    // A cached "yes" in the first workspace must not decide the second, for either its own member
+    // or the first workspace's.
+    const refusing = new ScriptedChecker(new Set());
+    const access = await resolveWorkspaceAccess(db(), {
+      workspaceId: second.workspaceId,
+      user: second.user,
+      checker: refusing,
+      permissionCacheSeconds: 300,
+    });
+
+    expect(access.visibleRepositories).toEqual([]);
+    expect(refusing.calls).toBe(1);
+  });
+
+  it('re-resolves an entirely expired cache and returns the same set', async () => {
+    const names = ['alpha', 'beta', 'gamma', 'delta'];
+    const { workspaceId, user } = await workspaceOf(names);
+    const readable = new Set(['beta', 'delta']);
+    const checker = new ScriptedChecker(readable);
+    const resolve = () =>
+      resolveWorkspaceAccess(db(), { workspaceId, user, checker, permissionCacheSeconds: 300 });
+
+    const first = await resolve();
+    expect(checker.calls).toBe(names.length);
+
+    await db().query(
+      "UPDATE repository_permissions SET expires_at = now() - interval '1 minute' WHERE workspace_id = $1",
+      [workspaceId],
+    );
+
+    const second = await resolve();
+    expect(checker.calls).toBe(names.length * 2);
+    expect(second.visibleRepositories.map((r) => r.name)).toEqual(
+      first.visibleRepositories.map((r) => r.name),
+    );
+  });
+
+  it('costs the same number of round trips for one repository as for many', async () => {
+    const small = await workspaceOf(['only']);
+    const large = await workspaceOf(Array.from({ length: 12 }, (_, i) => `repo-${i}`));
+
+    const count = async (workspace: Awaited<ReturnType<typeof workspaceOf>>) => {
+      // Warm the cache first: this measures the cached path, which is every page load but one.
+      await resolveWorkspaceAccess(db(), {
+        workspaceId: workspace.workspaceId,
+        user: workspace.user,
+        checker: allowAll,
+        permissionCacheSeconds: 300,
+      });
+      const counting = new CountingDatabase(db());
+      await resolveWorkspaceAccess(counting, {
+        workspaceId: workspace.workspaceId,
+        user: workspace.user,
+        checker: allowAll,
+        permissionCacheSeconds: 300,
+      });
+      return counting.queries;
+    };
+
+    expect(await count(large)).toBe(await count(small));
   });
 });
 

@@ -58,8 +58,10 @@ export default async function PersonalPage({
 
   const days = parsePeriodDays(periodParam);
   const period = periodOfDays(days);
-  const contributor = await contributorForUser(db(), workspaceId, session.user);
-  const status = await syncStatus(db(), workspaceId);
+  const [contributor, status] = await Promise.all([
+    contributorForUser(db(), workspaceId, session.user),
+    syncStatus(db(), workspaceId),
+  ]);
   const coverage = {
     periodStart: period.start,
     coverageStart: status.coverageStart,
@@ -86,20 +88,24 @@ export default async function PersonalPage({
     repositoryIds: access.visibleRepositoryIds,
     contributorId: contributor.id,
   };
-  const current = await teamMetrics(scope, filter);
-  const earlier = await teamMetrics(scope, { ...filter, period: previousPeriod(period) });
-  const pullRequests = await listPullRequests(scope, filter, { limit: 50 });
-
   // The same rollup layer the team view reads, scoped to one contributor: their own values, with
-  // no comparison set (design.md D10).
-  const settings = await loadMetricSettings(db(), workspaceId);
+  // no comparison set (design.md D10). Independent reads go together (design.md D2); the series
+  // and the distribution wait only because they need the settings.
+  const [current, earlier, pullRequests, settings] = await Promise.all([
+    teamMetrics(scope, filter),
+    teamMetrics(scope, { ...filter, period: previousPeriod(period) }),
+    listPullRequests(scope, filter, { limit: 50 }),
+    loadMetricSettings(db(), workspaceId),
+  ]);
   const granularity = parseGranularity(granularityParam, days);
-  const buckets = await metricSeries(scope, filter, {
-    granularity,
-    settings,
-    coverageStart: status.coverageStart,
-  });
-  const sizeDistribution = await metricDistribution(scope, filter, { metric: 'size', settings });
+  const [buckets, sizeDistribution] = await Promise.all([
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      coverageStart: status.coverageStart,
+    }),
+    metricDistribution(scope, filter, { metric: 'size', settings }),
+  ]);
 
   const mergedTrend = trend(current.mergedCount, earlier.mergedCount);
   const cycleTrend = trend(current.cycleTime.median, earlier.cycleTime.median);

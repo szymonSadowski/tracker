@@ -18,10 +18,12 @@ export default async function SettingsPage({
   const { workspaceId } = await params;
   await loadWorkspacePage(workspaceId, { requireOwner: true });
 
-  const installation = await installationForWorkspace(db(), workspaceId);
-  const repositories = await listRepositories(db(), workspaceId);
-  const status = await syncStatus(db(), workspaceId);
-  const members = await listMembers(db(), workspaceId);
+  const [installation, repositories, status, members] = await Promise.all([
+    installationForWorkspace(db(), workspaceId),
+    listRepositories(db(), workspaceId),
+    syncStatus(db(), workspaceId),
+    listMembers(db(), workspaceId),
+  ]);
   const slug = loadConfig().github.appSlug;
   const configureUrl = installation
     ? `https://github.com/settings/installations/${installation.githubInstallationId}`
