@@ -5,6 +5,11 @@
   --text: #1c1c1a;
   --muted: #6b6b66;
   --accent: #2f5d50;
+  /* Brand gradient ends. --brand-to is chosen to clear 4.5:1 against --bg on its own, so the
+     wordmark never leans on the brand-name contrast exemption to be readable (design.md D3).
+     Duplicated in app/icon.svg, which cannot read custom properties (D5). */
+  --brand-from: #2f5d50;
+  --brand-to: #37806a;
   --warn: #8a5a12;
   --warn-bg: #fdf6e7;
   --radius: 10px;
@@ -87,10 +92,25 @@ h2 {
   flex: 1;
 }
 
+/* The wordmark. `color` is declared before the clip so a browser that applies
+   background-clip: text without the transparent fill still renders solid green rather than
+   invisible text (design.md D1). */
 .brand {
   font-weight: 650;
-  letter-spacing: -0.01em;
+  letter-spacing: 0.14em;
   text-decoration: none;
+  color: var(--accent);
+  background: linear-gradient(95deg, var(--brand-from), var(--brand-to));
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* The workspace in view, subordinate to the wordmark it sits beside. */
+.brand-workspace {
+  color: var(--muted);
+  font-size: 0.9rem;
+  margin-left: -0.5rem;
 }
 
 select,
@@ -243,9 +263,11 @@ input[type='date'] {
   margin-bottom: 0.4rem;
 }
 
+/* No top margin here: a centred row centres each item's margin box, so spacing meant for a
+   standalone call to action pushes every button in a row below its control (design.md D6).
+   The standalone case reapplies it below. */
 .button {
   display: inline-block;
-  margin-top: 0.75rem;
   background: var(--accent);
   color: #fff;
   text-decoration: none;
@@ -254,6 +276,14 @@ input[type='date'] {
   padding: 0.45rem 0.9rem;
   font: inherit;
   cursor: pointer;
+}
+
+/* The standalone call to action: a button on its own beneath explanatory text (D6). `p + .button`
+   is the same case elsewhere — sign-in, the dashboard install link, the settings anchors — and it
+   cannot match a button in a row, where the previous sibling is an input, a select, or a chip. */
+.coldstart .button,
+p + .button {
+  margin-top: 0.75rem;
 }
 
 .button-secondary {
@@ -362,6 +392,32 @@ td.absent {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+/* One request per row: what it is, the control that asks for it, and what it costs (D7). Each
+   row keeps its own outcome notice beneath it, because the two responses differ in shape (D9). */
+.request-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+/* Divides one row from the next — not the section's framing from the first row. A sibling
+   combinator rather than :first-of-type, which cannot match here: .section-head is the first div
+   in the section, so the first row is never the first of its type. */
+.request-row + .request-row {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.request-row > h3 {
+  font-size: 0.95rem;
+  margin: 0;
+}
+
+.request-row > .muted {
+  margin: 0;
 }
 
 .signin {

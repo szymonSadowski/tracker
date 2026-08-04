@@ -94,13 +94,11 @@ export default async function SettingsPage({
 
       <Section title="Sync">
         <p className="muted">
-          Connecting a repository ingests its recent history; older pull requests are only fetched
-          when asked for here.
+          Both requests fetch pull requests; they differ in the direction they move along the
+          timeline. One brings the workspace up to date with what has changed since the last sync;
+          the other extends coverage backwards into history the workspace does not hold yet.
         </p>
         <SyncNowButton workspaceId={workspaceId} />
-      </Section>
-
-      <Section title="History">
         <HistorySyncControl workspaceId={workspaceId} />
       </Section>
 

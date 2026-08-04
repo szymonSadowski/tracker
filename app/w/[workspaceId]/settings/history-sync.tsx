@@ -63,7 +63,12 @@ export function HistorySyncControl({ workspaceId }: { workspaceId: string }) {
   const invalid = scope === 'since' && (since === '' || Number.isNaN(new Date(since).getTime()));
 
   return (
-    <div className="stack">
+    <div className="request-row">
+      <h3>Older history</h3>
+      <p className="muted">
+        Walks each repository backwards from its newest pull request. A large organisation can take
+        hours; progress is recorded as it goes, and leaving this page does not stop it.
+      </p>
       <div className="inline-form">
         <label>
           <input
@@ -96,15 +101,9 @@ export function HistorySyncControl({ workspaceId }: { workspaceId: string }) {
           }}
         />
         <button className="button" type="button" onClick={request} disabled={pending || invalid}>
-          {pending ? 'Requesting…' : 'Sync history'}
+          {pending ? 'Requesting…' : 'Sync older'}
         </button>
       </div>
-      <p className="muted">
-        Each repository is walked backwards from its newest pull request, so coverage reaches
-        further back the longer it runs, and it runs behind ordinary syncing so current data stays
-        fresh. A large organisation can take hours or days; progress is recorded as it goes, and
-        leaving this page does not stop it.
-      </p>
       {error ? <p className="notice notice-warn">{error}</p> : null}
       {outcome ? (
         <div className="notice">

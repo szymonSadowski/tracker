@@ -36,10 +36,17 @@ export function SyncNowButton({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="stack">
-      <button className="button" type="button" onClick={trigger} disabled={pending}>
-        {pending ? 'Requesting…' : 'Sync now'}
-      </button>
+    <div className="request-row">
+      <h3>Recent changes</h3>
+      <p className="muted">
+        Fetches what has changed since the last sync, across every repository in scope. It
+        completes promptly.
+      </p>
+      <div className="inline-form">
+        <button className="button" type="button" onClick={trigger} disabled={pending}>
+          {pending ? 'Requesting…' : 'Sync recent'}
+        </button>
+      </div>
       {error ? <p className="notice notice-warn">{error}</p> : null}
       {outcome ? <p className="notice">{describe(outcome)}</p> : null}
     </div>
