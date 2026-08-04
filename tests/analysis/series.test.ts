@@ -783,32 +783,4 @@ describe('merged pull requests as events', () => {
     expect(result.contributors[0]!.truncated).toBe(true);
     expect(result.truncated).toBe(true);
   });
-
-  it('limits results to the requested contributors', async () => {
-    const { workspaceId, repositoryId, scope } = await fixture();
-    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
-    const zoe = await seedContributor(db(), workspaceId, { login: 'zoe' });
-    await seedPullRequest(db(), {
-      workspaceId,
-      repositoryId,
-      authorContributorId: ada.id,
-      mergedAt: at(2),
-    });
-    await seedPullRequest(db(), {
-      workspaceId,
-      repositoryId,
-      authorContributorId: zoe.id,
-      mergedAt: at(3),
-    });
-    await analyzeAll();
-
-    const result = await mergeEventSeries(
-      scope,
-      { period: { start: BASE_TIME, end: at(24), label: 'day' }, repositoryIds: [repositoryId] },
-      { contributorIds: [ada.id] },
-    );
-
-    expect(result.contributors.map((group) => group.login)).toEqual(['ada']);
-    expect(result.truncated).toBe(false);
-  });
 });

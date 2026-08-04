@@ -893,7 +893,7 @@ export const MAX_MERGE_EVENTS = 1000;
 export async function mergeEventSeries(
   scope: WorkspaceScope,
   filter: MetricScope,
-  options: Omit<SeriesOptions, 'granularity'> & { limit?: number; contributorIds?: string[] } = {},
+  options: Omit<SeriesOptions, 'granularity'> & { limit?: number } = {},
 ): Promise<MergeEventSeries> {
   const merged = buildPredicate(filter, { merged: true });
   const params = [...merged.params];
@@ -903,11 +903,6 @@ export async function mergeEventSeries(
   };
   const limit = Math.max(1, options.limit ?? MAX_MERGE_EVENTS);
   const limitParam = push(limit);
-  const contributorIds = options.contributorIds?.filter((id) => id.length > 0) ?? [];
-  const contributorPredicate =
-    contributorIds.length > 0
-      ? `AND a.author_contributor_id = ANY(${push(contributorIds)})`
-      : '';
 
   const { rows } = await scope.query<{
     pull_request_id: string;
@@ -935,7 +930,6 @@ export async function mergeEventSeries(
          JOIN repositories r ON r.id = a.repository_id
         WHERE ${merged.sql}
           AND a.author_contributor_id IS NOT NULL
-          ${contributorPredicate}
      )
      SELECT e.pull_request_id, e.contributor_id, e.number, e.title, e.url,
             e.repository_full_name, e.merged_at, e.total,

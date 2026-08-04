@@ -411,7 +411,7 @@ describe('the throughput chart variants', () => {
     tier: 'elite' as const,
     lowerBound: 1,
     upperBound: null,
-    unit: 'count' as const,
+    unit: 'per_contributor_day' as const,
     source: 'A published study',
     studyDate: new Date('2026-01-01T00:00:00Z'),
     thresholds: [],
