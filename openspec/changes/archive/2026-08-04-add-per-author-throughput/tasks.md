@@ -34,4 +34,4 @@
 
 ## 5. Follow-up
 
-- [ ] 5.1 Confirm the chart on the deployed team view once the prod data refresh lands
+- [x] 5.1 Confirm the chart on the deployed team view once the prod data refresh lands
