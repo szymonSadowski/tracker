@@ -233,7 +233,7 @@ Claimed by `ORDER BY priority ASC, run_after ASC, created_at ASC` — lower numb
 
 | Priority | Job |
 | --- | --- |
-| 10 | `repository.incremental_sync` when a member pressed Sync now |
+| 10 | `repository.incremental_sync` when a member pressed Sync recent |
 | 80 | `pull_request.analyze` |
 | 100 (default) | `repository.backfill`, scheduled `repository.incremental_sync`, `repository.history_sync`, `installation.reconcile_repositories`, `workspace.schedule_syncs`, `workspace.recompute_analysis`, `repository.reprocess` |
 | 120 | `repository.commit_sync` |

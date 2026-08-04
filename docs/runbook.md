@@ -36,7 +36,7 @@ VALUES (:workspace, 'repository.incremental_sync',
 ON CONFLICT DO NOTHING;
 ```
 
-Members can do the same from the product: the **Sync now** button in settings, which posts to
+Members can do the same from the product: the **Sync recent** button in settings, which posts to
 `POST /api/workspaces/<id>/sync`, debounced per workspace by `ON_DEMAND_SYNC_DEBOUNCE_SECONDS`. A
 request inside that interval is reported back as such rather than silently dropped, along with any
 repositories skipped because their backfill has not finished.

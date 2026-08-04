@@ -25,8 +25,11 @@ export default async function WorkspaceLayout({
     <div className="shell">
       <header className="topbar">
         <Link className="brand" href={`/w/${workspaceId}`}>
-          {workspace?.accountLogin ?? 'Tracker'}
+          TRACKER
         </Link>
+        {/* The workspace in view, secondary to the wordmark. Omitted rather than rendered empty
+            when the workspace read comes back undefined. */}
+        {workspace ? <span className="brand-workspace">{workspace.accountLogin}</span> : null}
         <nav>
           <Link href={`/w/${workspaceId}`}>Team</Link>
           <Link href={`/w/${workspaceId}/pulls`}>Pull requests</Link>

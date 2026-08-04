@@ -457,7 +457,7 @@ scopes environment variables per environment, and a preview without them fails w
 
 ### Driving the drain
 
-The trigger interval is the floor on how long a member waits after pressing **Sync now** — the
+The trigger interval is the floor on how long a member waits after pressing **Sync recent** — the
 button only enqueues (`app/api/workspaces/[workspaceId]/sync/route.ts`). It also bounds how quickly
 a retry is picked up (backoff starts at 10s) and how long a finished classification batch sits
 uncollected (that job re-enqueues itself every 5 minutes). **One minute is the target; anything
