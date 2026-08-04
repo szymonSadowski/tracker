@@ -13,6 +13,8 @@ import {
   HistogramChart,
   LineChart,
   StackedBarChart,
+  StepChart,
+  type ChartEventSeries,
   type ChartPoint,
   type ChartSeries,
 } from './charts';
@@ -21,6 +23,7 @@ import type { BenchmarkAssignment } from '../analysis/benchmarks';
 import type {
   ContributorThroughput,
   Histogram,
+  MergeEventSeries,
   MetricBucket,
   WorkMixBucket,
 } from '../analysis/series';
@@ -61,36 +64,78 @@ export interface MetricChartsProps {
   churnToggleHref?: string;
 }
 
-/** Throughput, with its benchmark tier stated in the unit the study publishes. */
+/**
+ * Throughput, with its benchmark tier stated in the unit the study publishes.
+ *
+ * Two variants, because the same normalization does not mean the same thing at both scopes
+ * (design.md D8). On a team the denominator is the people in it, and a rate per contributor is the
+ * comparable figure. On one person the denominator is that person's own tenure fraction, so the
+ * rate describes how long they have been a member rather than what they merged — the count is the
+ * honest quantity there, and it is the one the view's own headline tile states.
+ */
 export function ThroughputChart({
   buckets,
   drillThrough,
   benchmark,
+  variant = 'per-contributor',
 }: {
   buckets: readonly MetricBucket[];
   drillThrough?: string;
   benchmark?: BenchmarkAssignment;
+  variant?: 'per-contributor' | 'count';
 }) {
+  const perContributor = variant === 'per-contributor';
+  // A count carries no benchmark: the published band is stated per contributor per day, and has
+  // nothing to say about a raw count (spec: benchmarks are stated in their own unit).
+  const tier = perContributor ? benchmark : undefined;
+  // Only meaningful against a rate. A count variant is already a count, so there is no stand-in to
+  // declare (design.md D9).
+  const standingIn = perContributor
+    ? buckets.filter((bucket) => bucket.denominatorMissing && !bucket.outsideCoverage).length
+    : 0;
+
   return (
     <LineChart
-      title="PR throughput per contributor"
-      description="Merged pull requests divided by the prorated contributors in scope."
+      title={perContributor ? 'PR throughput per contributor' : 'Merged pull requests'}
+      description={
+        perContributor
+          ? 'Merged pull requests divided by the prorated contributors in scope.'
+          : 'Pull requests merged in each bucket. Summed over the period, this is the merged count stated above.'
+      }
       series={[
         {
-          name: 'Per contributor',
-          points: toPoints(buckets, (bucket) => bucket.throughputPerContributor, drillThrough),
+          name: perContributor ? 'Per contributor' : 'Merged',
+          points: toPoints(
+            buckets,
+            (bucket) => (perContributor ? bucket.throughputPerContributor : bucket.mergedCount),
+            drillThrough,
+          ),
         },
       ]}
-      format={(value) => (value === null ? UNAVAILABLE : formatNumber(value, 2))}
+      format={(value) =>
+        value === null ? UNAVAILABLE : perContributor ? formatNumber(value, 2) : formatCount(value)
+      }
       note={
-        benchmark ? (
-          <BenchmarkTier
-            tier={benchmark.tier}
-            lowerBound={benchmark.lowerBound}
-            upperBound={benchmark.upperBound}
-            source={benchmark.source}
-            format={(value) => (value === null ? '—' : `${formatNumber(value, 2)}/day`)}
-          />
+        tier || standingIn > 0 ? (
+          <>
+            {standingIn > 0 ? (
+              // Said rather than silently drawn: the alternative is a number under a "per
+              // contributor" label that is not one (design.md D9).
+              <>
+                {standingIn} bucket(s) have merged pull requests but no contributor on record for
+                the period, so their figure is the merged count standing in for a rate.{' '}
+              </>
+            ) : null}
+            {tier ? (
+              <BenchmarkTier
+                tier={tier.tier}
+                lowerBound={tier.lowerBound}
+                upperBound={tier.upperBound}
+                source={tier.source}
+                format={(value) => (value === null ? '—' : `${formatNumber(value, 2)}/day`)}
+              />
+            ) : null}
+          </>
         ) : null
       }
     />
@@ -534,6 +579,81 @@ export function ContributorThroughputChart({
               : ''}
           </span>
         </div>
+      }
+    />
+  );
+}
+
+/**
+ * Merged pull requests as a cumulative line, one step per pull request (spec: analytics-dashboard
+ * "Merged throughput is presentable per pull request").
+ *
+ * Not a second metric. It is the merged count the headline tile states, at the resolution of the
+ * pull request rather than the bucket: the line's final value is that count, by construction
+ * rather than by two code paths happening to agree (design.md D3). The running total is the
+ * event's position in its own group, so there is nowhere for a second definition of "the total" to
+ * live.
+ *
+ * Series stay in the name order `mergeEventSeries` returns them in. A cumulative line does end at
+ * a person's total, which makes totals comparable — but it is the comparability four bars already
+ * have, and nothing upstream returns people ordered by it (design.md D10).
+ */
+export function CumulativeThroughputChart({
+  data,
+  periodStart,
+  periodEnd,
+  selected,
+  timeZone,
+  emptyMessage,
+}: {
+  data: MergeEventSeries;
+  periodStart: Date;
+  periodEnd: Date;
+  /** Contributor ids to draw, already capped by the caller. Undefined draws every group. */
+  selected?: readonly string[];
+  timeZone?: string;
+  /** What a period with no merges says, where the surface has its own framing for that. */
+  emptyMessage?: string;
+}) {
+  const chosen = selected === undefined ? null : new Set(selected);
+  const groups =
+    chosen === null
+      ? data.contributors
+      : data.contributors.filter((group) => chosen.has(group.contributorId));
+
+  const series: ChartEventSeries[] = groups.map((group) => ({
+    name: group.name,
+    events: group.events.map((event, index) => ({
+      at: event.mergedAt,
+      // The running total is the event's own position in the group: one merge raises the line by
+      // exactly one, whatever that merge contained.
+      value: index + 1,
+      label: `#${event.number} ${event.title}`,
+      href: event.url ?? undefined,
+    })),
+  }));
+
+  return (
+    <StepChart
+      title="Cumulative merged pull requests"
+      description="One step per merged pull request, placed when it merged. The line ends at the same merged count stated above; only its resolution is finer."
+      series={series}
+      periodStart={periodStart}
+      periodEnd={periodEnd}
+      coverageStart={data.coverageStart}
+      timeZone={timeZone}
+      format={(value) => (value === null ? UNAVAILABLE : formatCount(value))}
+      // An empty selection is a choice the viewer just made, not a period without merges.
+      emptyMessage={chosen !== null && chosen.size === 0 ? 'No authors selected.' : emptyMessage}
+      note={
+        data.truncated ? (
+          // Said rather than drawn short: a line quietly ending below the headline count is the
+          // worst failure available to a chart whose whole claim is that the two agree (D6).
+          <>
+            More merged pull requests fall in this period than the chart reads, so the line stops
+            short of the count stated above. Narrow the period to see them all.
+          </>
+        ) : null
       }
     />
   );

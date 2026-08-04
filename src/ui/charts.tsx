@@ -129,7 +129,15 @@ function ValueTable({
  * with strokes, a filled and textured swatch for one drawn with areas (spec: "A viewer matches a
  * legend entry to a mark").
  */
-function Legend({ series, kind }: { series: readonly ChartSeries[]; kind: LegendKind }) {
+function Legend({
+  series,
+  kind,
+}: {
+  // Only the name is read, so bucketed and event series share one legend rather than two that
+  // could drift about what a swatch means.
+  series: readonly { name: string }[];
+  kind: LegendKind;
+}) {
   return (
     <ul className="chart-legend">
       {series.map((entry, index) => (
@@ -416,6 +424,295 @@ export function LineChart({
       </svg>
       <Legend series={series} kind="line" />
       <ValueTable caption={`${title} by bucket`} series={series} format={format} />
+    </ChartFrame>
+  );
+}
+
+/** One event on a time-positioned chart: an instant, the running value at it, and its identity. */
+export interface ChartEvent {
+  at: Date;
+  /** The series' value once this event has happened — for a cumulative line, its running total. */
+  value: number;
+  /** Names the event itself, e.g. `#412 Fix the retry loop`. */
+  label: string;
+  /** Where the event itself lives, so a mark leads to the thing it stands for. */
+  href?: string;
+}
+
+export interface ChartEventSeries {
+  name: string;
+  events: ChartEvent[];
+}
+
+/**
+ * How many events one series draws as separate marks.
+ *
+ * Above roughly this many the circles collide and the plot becomes a smear, so the marks thin
+ * while the path passes through every event and the table lists every event (design.md D5). The
+ * guarantee is on the line and the text, never on the circle count.
+ */
+export const MAX_EVENT_MARKS = 40;
+
+/** Evenly spaced indices, always including the first and the last. */
+function thinIndices(count: number, limit: number): number[] {
+  if (count <= limit) return Array.from({ length: count }, (_, index) => index);
+  const stride = (count - 1) / (limit - 1);
+  return [...new Set(Array.from({ length: limit }, (_, i) => Math.round(i * stride)))];
+}
+
+/** Positions along the period the axis labels, formatted in the workspace's zone. */
+const AXIS_TICKS = 5;
+
+/**
+ * A step chart over individual events, positioned by when they happened (design.md D1, D2).
+ *
+ * Separate from `LineChart` rather than a mode on it: `LineChart` derives its x positions, its
+ * axis, and its value table's label column from one shared bucket list, and events have none —
+ * two people's merges land at different instants, and there is a row per event rather than per
+ * bucket.
+ *
+ * The line steps rather than slopes. Between two events the running total is genuinely constant,
+ * and a diagonal would draw a value the series never held at a time it did not hold it — mid-slope
+ * a cumulative merge count would be a fraction of a pull request. The vertical is the event; the
+ * horizontal is the wait.
+ *
+ * It is anchored at both ends of the period: at zero where the period starts, and carried flat to
+ * where it ends. The trailing anchor is what makes the final value the period's total by
+ * construction rather than by two code paths agreeing (design.md D3).
+ */
+export function StepChart({
+  title,
+  description,
+  series,
+  periodStart,
+  periodEnd,
+  format,
+  note,
+  emptyMessage,
+  coverageStart,
+  timeZone = 'UTC',
+}: {
+  title: string;
+  description?: string;
+  series: readonly ChartEventSeries[];
+  periodStart: Date;
+  periodEnd: Date;
+  format: (value: number | null) => string;
+  note?: ReactNode;
+  /** Replaces the default when the chart has nothing to draw for a reason other than no merges. */
+  emptyMessage?: string;
+  /** Events are complete only from here: the span before it is hatched and named. */
+  coverageStart?: Date | null;
+  timeZone?: string;
+}) {
+  const total = series.reduce((sum, entry) => sum + entry.events.length, 0);
+  if (total === 0) {
+    return (
+      <ChartFrame title={title} description={description} note={note}>
+        {/*
+         * "No merges in this period", never "no buckets": the period is not empty, the record of
+         * merges within it is. A line drawn flat at zero would assert a measured nothing across a
+         * span that may not even be covered.
+         */}
+        <p className="muted">{emptyMessage ?? 'No pull requests merged in this period.'}</p>
+      </ChartFrame>
+    );
+  }
+
+  const span = Math.max(1, periodEnd.getTime() - periodStart.getTime());
+  const plotWidth = VIEW_WIDTH - PADDING.left - PADDING.right;
+  const plotHeight = VIEW_HEIGHT - PADDING.top - PADDING.bottom;
+  const max = niceMax(series.flatMap((entry) => entry.events.map((event) => event.value)));
+  // A fraction of the period computed from two instants, so no calendar arithmetic happens here
+  // and a daylight-saving boundary inside the period cannot shift a position.
+  const x = (at: Date): number => {
+    const fraction = (at.getTime() - periodStart.getTime()) / span;
+    return PADDING.left + Math.min(1, Math.max(0, fraction)) * plotWidth;
+  };
+  const y = (value: number): number => PADDING.top + plotHeight - (value / max) * plotHeight;
+  const round = (value: number): number => Math.round(value * 100) / 100;
+  const hatchId = `hatch-${chartId(title)}`;
+
+  const formatInstant = (at: Date): string =>
+    new Intl.DateTimeFormat('en-GB', {
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone,
+    }).format(at);
+  const formatTick = (at: Date): string =>
+    new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone }).format(at);
+
+  const gridValues = Array.from(
+    { length: GRID_DIVISIONS },
+    (_, i) => (max * (i + 1)) / GRID_DIVISIONS,
+  );
+  const ticks = Array.from(
+    { length: AXIS_TICKS },
+    (_, i) => new Date(periodStart.getTime() + (span * i) / (AXIS_TICKS - 1)),
+  );
+  const uncoveredUntil =
+    coverageStart && coverageStart > periodStart
+      ? new Date(Math.min(coverageStart.getTime(), periodEnd.getTime()))
+      : null;
+
+  return (
+    <ChartFrame
+      title={title}
+      description={description}
+      note={
+        uncoveredUntil ? (
+          <>
+            Merges before {formatTick(uncoveredUntil)} fall outside recorded coverage, so the flat
+            run there is missing data rather than a quiet stretch. {note}
+          </>
+        ) : (
+          note
+        )
+      }
+    >
+      <svg
+        className="chart-svg"
+        viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
+        preserveAspectRatio="xMidYMid meet"
+        role="img"
+        aria-label={`${title}. The underlying values follow in a table.`}
+      >
+        <Hatch id={hatchId} />
+        {uncoveredUntil ? (
+          <rect
+            x={PADDING.left}
+            y={PADDING.top}
+            width={Math.max(0, round(x(uncoveredUntil) - PADDING.left))}
+            height={plotHeight}
+            fill={`url(#${hatchId})`}
+          >
+            <title>Outside recorded coverage.</title>
+          </rect>
+        ) : null}
+        {gridValues.map((value) => (
+          <g key={`g-${value}`}>
+            <line
+              className="chart-grid"
+              x1={PADDING.left}
+              y1={y(value)}
+              x2={VIEW_WIDTH - PADDING.right}
+              y2={y(value)}
+            />
+            <text x="4" y={y(value) + 4} className="chart-axis">
+              {format(value)}
+            </text>
+          </g>
+        ))}
+        <line
+          x1={PADDING.left}
+          y1={PADDING.top + plotHeight}
+          x2={VIEW_WIDTH - PADDING.right}
+          y2={PADDING.top + plotHeight}
+          stroke="var(--border)"
+        />
+        <text x="4" y={PADDING.top + plotHeight + 4} className="chart-axis">
+          0
+        </text>
+
+        {series.map((entry, seriesIndex) => {
+          const encoding = seriesEncoding(seriesIndex);
+          // Horizontal to the event, then vertical to its new value. Written as H and V rather
+          // than L so a diagonal is not merely avoided but unexpressible here.
+          const path = [
+            `M${round(x(periodStart))},${round(y(0))}`,
+            ...entry.events.map((event) => `H${round(x(event.at))} V${round(y(event.value))}`),
+            `H${round(x(periodEnd))}`,
+          ].join(' ');
+          const drawn = thinIndices(entry.events.length, MAX_EVENT_MARKS);
+
+          return (
+            <g key={entry.name}>
+              <path
+                className={`chart-mark chart-step chart-mark-${encoding.key}`}
+                d={path}
+                fill="none"
+                stroke="var(--accent)"
+                strokeWidth={2}
+                strokeDasharray={encoding.dash}
+                opacity={encoding.opacity}
+              />
+              {drawn.map((index) => {
+                const event = entry.events[index]!;
+                const mark = (
+                  <circle
+                    className={`chart-mark chart-event chart-mark-${encoding.key}`}
+                    cx={round(x(event.at))}
+                    cy={round(y(event.value))}
+                    r={3}
+                    fill="var(--accent)"
+                    opacity={encoding.opacity}
+                  >
+                    {/*
+                     * A native title is the whole hover affordance: there is no tooltip layer and
+                     * no hydration, and the table below carries the same facts as text (D4).
+                     */}
+                    <title>{`${entry.name} · ${event.label} · ${formatInstant(event.at)} · ${format(event.value)}`}</title>
+                  </circle>
+                );
+                return event.href ? (
+                  <a
+                    key={`${entry.name}-${event.label}-${index}`}
+                    href={event.href}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {mark}
+                  </a>
+                ) : (
+                  <g key={`${entry.name}-${event.label}-${index}`}>{mark}</g>
+                );
+              })}
+            </g>
+          );
+        })}
+
+        {ticks.map((tick, index) => (
+          <text
+            key={`x-${tick.getTime()}`}
+            x={round(x(tick))}
+            y={VIEW_HEIGHT - 8}
+            textAnchor={index === 0 ? 'start' : index === ticks.length - 1 ? 'end' : 'middle'}
+            className="chart-axis"
+          >
+            {formatTick(tick)}
+          </text>
+        ))}
+      </svg>
+      <Legend series={series} kind="line" />
+      {/*
+       * One row per event, not per bucket: this is what a screen reader reads instead of the SVG,
+       * and it is where the completeness guarantee lives when the marks have thinned.
+       */}
+      <table className="visually-hidden">
+        <caption>{`${title} by pull request`}</caption>
+        <thead>
+          <tr>
+            <th scope="col">Series</th>
+            <th scope="col">Pull request</th>
+            <th scope="col">Merged</th>
+            <th scope="col">Running total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {series.flatMap((entry) =>
+            entry.events.map((event, index) => (
+              <tr key={`${entry.name}-${event.label}-${index}`}>
+                <td>{entry.name}</td>
+                <th scope="row">{event.label}</th>
+                <td>{formatInstant(event.at)}</td>
+                <td>{format(event.value)}</td>
+              </tr>
+            )),
+          )}
+        </tbody>
+      </table>
     </ChartFrame>
   );
 }

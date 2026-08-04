@@ -33,11 +33,12 @@ import { GranularitySelector } from '@/ui/charts';
 import {
   ChurnChart,
   CommitActivityChart,
+  CumulativeThroughputChart,
   CycleTimePhaseChart,
   DistributionView,
   ThroughputChart,
 } from '@/ui/metric-charts';
-import { metricDistribution, metricSeries } from '@/analysis/series';
+import { mergeEventSeries, metricDistribution, metricSeries } from '@/analysis/series';
 import { loadMetricSettings } from '@/analysis/settings';
 import { coverageStart, listCoverage } from '@/repositories/coverage';
 
@@ -111,7 +112,7 @@ export default async function PersonalPage({
     coverageRecords.filter((record) => record.dataClass === 'file_diffs'),
     access.visibleRepositoryIds,
   );
-  const [buckets, churnBuckets, sizeDistribution] = await Promise.all([
+  const [buckets, churnBuckets, sizeDistribution, mergeEvents] = await Promise.all([
     metricSeries(scope, filter, {
       granularity,
       settings,
@@ -124,6 +125,8 @@ export default async function PersonalPage({
       coverageStart: churnCoverage.start,
     }),
     metricDistribution(scope, filter, { metric: 'size', settings }),
+    // The same merges the tile counts, as individual events rather than bucket totals.
+    mergeEventSeries(scope, filter, { settings, coverageStart: status.coverageStart }),
   ]);
 
   const mergedTrend = trend(current.mergedCount, earlier.mergedCount);
@@ -162,15 +165,27 @@ export default async function PersonalPage({
         }
       >
         {/*
-          * These charts take drill-through, the churn coverage statement, and the shares/lines
-          * toggle — facts about the data, which a person is as entitled to about their own work as
-          * a team is about theirs — and deliberately take no `benchmark`, `reworkThreshold`, or
-          * `refactorThreshold`. A published tier is an industry norm, and `docs/dignity-review.md`
-          * holds that the only comparison offered to an individual is against their own previous
-          * period, never against a colleague or a norm. The asymmetry with the team view is the
-          * rule, not an oversight; `tests/surfaces/dignity.test.ts` fails if it is "fixed".
-          */}
-        <ThroughputChart buckets={buckets} drillThrough={drillThrough} />
+         * These charts take drill-through, the churn coverage statement, and the shares/lines
+         * toggle — facts about the data, which a person is as entitled to about their own work as
+         * a team is about theirs — and deliberately take no `benchmark`, `reworkThreshold`, or
+         * `refactorThreshold`. A published tier is an industry norm, and `docs/dignity-review.md`
+         * holds that the only comparison offered to an individual is against their own previous
+         * period, never against a colleague or a norm. The asymmetry with the team view is the
+         * rule, not an oversight; `tests/surfaces/dignity.test.ts` fails if it is "fixed".
+         */}
+        {/*
+         * Counts, not a rate. At this scope the contributor denominator is the viewer's own
+         * tenure fraction, so a "per contributor" figure would divide their work by themselves
+         * and match nothing else on the page (design.md D8).
+         */}
+        <ThroughputChart buckets={buckets} drillThrough={drillThrough} variant="count" />
+        <CumulativeThroughputChart
+          data={mergeEvents}
+          periodStart={period.start}
+          periodEnd={period.end}
+          timeZone={settings.timeZone}
+          emptyMessage="No pull requests merged in this period. Work happens in different shapes at different times; this is a record, not a target."
+        />
         <CycleTimePhaseChart buckets={buckets} drillThrough={drillThrough} />
         <ChurnChart
           buckets={churnBuckets}

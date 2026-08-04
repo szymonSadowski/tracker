@@ -19,9 +19,11 @@ import { analyzePullRequest } from '../../src/analysis/service';
 import {
   churnShares,
   contributorThroughputSeries,
+  mergeEventSeries,
   metricDistribution,
   metricSeries,
 } from '../../src/analysis/series';
+import { teamMetrics } from '../../src/analysis/aggregate';
 import { assignTier, loadBenchmarkThresholds } from '../../src/analysis/benchmarks';
 import { DEFAULT_METRIC_SETTINGS } from '../../src/analysis/settings';
 import { persistRepositoryCommits } from '../../src/ingest/commits';
@@ -223,7 +225,7 @@ describe('the contributor denominator', () => {
     expect(inB!.contributors).toBeCloseTo(0.5, 2);
   });
 
-  it('leaves throughput absent when a scope has no active contributors', async () => {
+  it('leaves throughput absent when a scope has no active contributors and nothing merged', async () => {
     const { repositoryId, scope } = await fixture();
 
     const [bucket] = await metricSeries(
@@ -233,7 +235,76 @@ describe('the contributor denominator', () => {
     );
 
     expect(bucket!.contributors).toBe(0);
+    // Nothing merged and nobody in scope: there is no rate to state, and no count being withheld.
+    expect(bucket!.mergedCount).toBe(0);
     expect(bucket!.throughputPerContributor).toBeNull();
+    expect(bucket!.denominatorMissing).toBe(false);
+  });
+
+  it('reports the merged count when merges exist and the denominator is empty', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    // No membership row, which is the shape the reporting workspace was in: memberships begin at
+    // first sync while ingested pull requests reach further back. The bucket used to go absent and
+    // the merges were drawn nowhere at all.
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    for (const hours of [1, 2, 3]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: ada.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const [bucket] = await metricSeries(
+      scope,
+      { period: { start: BASE_TIME, end: at(24), label: 'a day' }, repositoryIds: [repositoryId] },
+      { granularity: 'day' },
+    );
+
+    expect(bucket!.contributors).toBe(0);
+    expect(bucket!.mergedCount).toBe(3);
+    // The count wins over the empty denominator, and says that is what it is.
+    expect(bucket!.throughputPerContributor).toBe(3);
+    expect(bucket!.throughputPerContributorDay).toBe(3);
+    expect(bucket!.denominatorMissing).toBe(true);
+  });
+
+  it('sums a contributor-scoped period to the merged count the tile reports', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    // Membership begins on the third day of a four-day window: every earlier bucket has a zero
+    // denominator, which is exactly where merges used to disappear.
+    await db().query(
+      `INSERT INTO workspace_memberships (workspace_id, contributor_id, started_at)
+       VALUES ($1, $2, $3)`,
+      [workspaceId, ada.id, at(24 * 2)],
+    );
+    for (const hours of [1, 25, 49, 73]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: ada.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const filter = {
+      period: { start: BASE_TIME, end: at(24 * 4), label: '4 days' },
+      repositoryIds: [repositoryId],
+      contributorId: ada.id,
+    };
+    const buckets = await metricSeries(scope, filter, { granularity: 'day' });
+    const tile = await teamMetrics(scope, filter);
+
+    expect(tile.mergedCount).toBe(4);
+    expect(buckets.reduce((sum, bucket) => sum + bucket.mergedCount, 0)).toBe(tile.mergedCount);
+    // No bucket holding a merge is absent, whatever the membership intervals say.
+    for (const bucket of buckets) {
+      if (bucket.mergedCount > 0) expect(bucket.throughputPerContributor).not.toBeNull();
+    }
   });
 
   it('divides merged pull requests by the prorated contributor count', async () => {
@@ -568,5 +639,148 @@ describe('per-author throughput and tenure', () => {
 
     const series = result.contributors.find((entry) => entry.login === 'ada')!;
     expect(series.points.every((point) => point !== null)).toBe(true);
+  });
+});
+
+describe('merged pull requests as events', () => {
+  it('returns one event per merged pull request, matching the bucketed count', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    for (const hours of [1, 5, 30, 54]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: ada.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const filter = {
+      period: { start: BASE_TIME, end: at(24 * 3), label: '3 days' },
+      repositoryIds: [repositoryId],
+    };
+    const events = await mergeEventSeries(scope, filter);
+    const buckets = await metricSeries(scope, filter, { granularity: 'day' });
+
+    // The two resolutions of one metric: whatever the bucketing, the same merges.
+    const total = events.contributors.reduce((sum, group) => sum + group.events.length, 0);
+    expect(total).toBe(buckets.reduce((sum, bucket) => sum + bucket.mergedCount, 0));
+    expect(total).toBe(4);
+  });
+
+  it('orders groups by name and never by how many events each has', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    // zoe sorts last alphabetically and first by output: if the ordering ever became a ranking,
+    // this assertion is what catches it.
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    const zoe = await seedContributor(db(), workspaceId, { login: 'zoe' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    for (const hours of [3, 4, 5]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: zoe.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const result = await mergeEventSeries(scope, {
+      period: { start: BASE_TIME, end: at(24), label: 'day' },
+      repositoryIds: [repositoryId],
+    });
+
+    expect(result.contributors.map((group) => group.login)).toEqual(['ada', 'zoe']);
+    expect(result.contributors.map((group) => group.events.length)).toEqual([1, 3]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it('omits a contributor with no merged pull request in the period', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    await seedContributor(db(), workspaceId, { login: 'idle' });
+    await seedPullRequest(db(), {
+      workspaceId,
+      repositoryId,
+      authorContributorId: ada.id,
+      mergedAt: at(2),
+    });
+    await analyzeAll();
+
+    const result = await mergeEventSeries(scope, {
+      period: { start: BASE_TIME, end: at(24), label: 'day' },
+      repositoryIds: [repositoryId],
+    });
+
+    // Absent, not present with an empty group: a flat line per non-merging member says more about
+    // who is being watched than about the work.
+    expect(result.contributors.map((group) => group.login)).toEqual(['ada']);
+  });
+
+  it('orders events by merge time and names the pull request behind each', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    // Seeded out of order, so the ordering is the query's rather than the insertion's.
+    for (const hours of [7, 2, 5]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: ada.id,
+        title: `Change at ${hours}h`,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const result = await mergeEventSeries(scope, {
+      period: { start: BASE_TIME, end: at(24), label: 'day' },
+      repositoryIds: [repositoryId],
+    });
+
+    const events = result.contributors[0]!.events;
+    expect(events.map((event) => event.title)).toEqual([
+      'Change at 2h',
+      'Change at 5h',
+      'Change at 7h',
+    ]);
+    const times = events.map((event) => event.mergedAt.getTime());
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+    // Enough identity to name a step and to link out of the chart to it.
+    for (const event of events) {
+      expect(event.number).toBeGreaterThan(0);
+      expect(event.url).toContain('/pull/');
+      expect(event.repositoryFullName).toBeTruthy();
+    }
+  });
+
+  it('says so when the per-contributor cap trims a group', async () => {
+    const { workspaceId, repositoryId, scope } = await fixture();
+    const ada = await seedContributor(db(), workspaceId, { login: 'ada' });
+    for (const hours of [1, 2, 3]) {
+      await seedPullRequest(db(), {
+        workspaceId,
+        repositoryId,
+        authorContributorId: ada.id,
+        mergedAt: at(hours),
+      });
+    }
+    await analyzeAll();
+
+    const result = await mergeEventSeries(
+      scope,
+      { period: { start: BASE_TIME, end: at(24), label: 'day' }, repositoryIds: [repositoryId] },
+      { limit: 2 },
+    );
+
+    // A short series that said nothing would disagree with the headline count in silence.
+    expect(result.contributors[0]!.events).toHaveLength(2);
+    expect(result.contributors[0]!.truncated).toBe(true);
+    expect(result.truncated).toBe(true);
   });
 });

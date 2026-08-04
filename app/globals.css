@@ -492,6 +492,27 @@ td.absent {
   stroke-dasharray: 2 4;
 }
 
+/*
+ * A cumulative event line. The joins are square because the shape is a step: a rounded corner
+ * would soften the vertical into something that reads as a short slope, which is the one thing the
+ * step exists to deny (design.md D2).
+ */
+.chart-step {
+  stroke-linejoin: miter;
+  stroke-linecap: butt;
+}
+
+/* One merged pull request. Outlined so overlapping marks in a busy stretch stay countable. */
+.chart-event {
+  stroke: var(--surface);
+  stroke-width: 1;
+}
+
+.chart-svg a:focus-visible .chart-event {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
 .chart-threshold {
   stroke: var(--warn);
   stroke-width: 1.5;
