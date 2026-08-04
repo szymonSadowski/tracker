@@ -17,8 +17,14 @@ GitHub → *Settings* → *Developer settings* → *GitHub Apps* → **New GitHu
 | Setup URL | `https://<your-host>/api/github/setup` |
 | Redirect on update | **enabled** — so repository-selection changes come back to us |
 | Webhook | **inactive** for this release (see design.md D3) |
+| Where can this GitHub App be installed? | **Any account** if the App will ever be installed on an organization |
 
-Two of those are easy to get wrong, and GitHub's form does not explain either:
+The install-target setting is quiet about its consequence: an App left at *Only on this account*
+still installs fine on the account that owns it, and organizations are simply absent from the
+account chooser at install time — with no error explaining why. Choose **Any account** up front
+unless you are certain the App will only ever serve its owner's personal repositories.
+
+Two more are easy to get wrong, and GitHub's form does not explain either:
 
 - **OAuth during installation must stay off**, because GitHub disables the Setup URL field when it
   is on ("Unavailable when requesting OAuth during installation") and sends the installation back
@@ -73,6 +79,12 @@ an owner, and enqueues a backfill per repository.
 
 Changing the selection later (GitHub → the installation's *Configure* page) redirects back to the
 same URL; added repositories are backfilled, removed ones stop syncing and keep their data.
+
+An installation covers exactly one account, so an organization's repositories require a separate
+installation on that organization — which yields its own workspace, rather than adding repositories
+to an existing one. Start it from a workspace's *Settings* → *GitHub App installation*, or from the
+workspace list. Installing on an organization needs owner rights there (or approval from an owner),
+and the App's install-target setting from section 1 must be **Any account**.
 
 ## 4. Local development
 

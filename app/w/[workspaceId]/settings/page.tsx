@@ -30,6 +30,11 @@ export default async function SettingsPage({
     : slug
       ? `https://github.com/apps/${slug}/installations/new`
       : undefined;
+  // Kept separate from configureUrl: adding an account is a different action from managing this
+  // one, and the two must not collapse into a single link when no installation exists (D2).
+  const installElsewhereUrl = slug
+    ? `https://github.com/apps/${slug}/installations/new`
+    : undefined;
 
   return (
     <main>
@@ -57,6 +62,33 @@ export default async function SettingsPage({
           </>
         ) : (
           <p className="muted">No installation is connected to this workspace.</p>
+        )}
+
+        <h3 style={{ marginTop: '1.5rem' }}>Another GitHub account</h3>
+        <p className="muted">
+          An installation covers one GitHub account. Installing on another account — an
+          organization, say — creates a separate workspace for it; it does not add that
+          account&rsquo;s repositories to this one.
+        </p>
+        <p className="muted">
+          An organization is absent from GitHub&rsquo;s list of install targets when the App is
+          installable on a single account only, or when you are not an owner of that organization —
+          in which case the organization&rsquo;s approval flow applies.
+        </p>
+        {installElsewhereUrl ? (
+          <a
+            className="button button-secondary"
+            href={installElsewhereUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Install on another GitHub account
+          </a>
+        ) : (
+          <p className="muted">
+            No GitHub App slug is configured here, so an additional installation must be started
+            from the App&rsquo;s own page on GitHub.
+          </p>
         )}
       </Section>
 
