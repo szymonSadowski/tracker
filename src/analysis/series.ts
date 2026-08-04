@@ -11,10 +11,11 @@
  *    calendar and daylight-saving arithmetic, so a bucket assignment is the same on every
  *    recomputation and does not depend on the server's locale.
  * 3. **Nothing here orders contributors by a metric.** Contributor scope returns one contributor's
- *    own values. `contributorThroughputSeries` is the single exception to there being no per-person
- *    comparison set at all, and it returns merged counts in name order — the ordering is the
- *    guarantee, so a ranking still cannot be read out of this module (design.md D10 as amended by
- *    `add-per-author-throughput`).
+ *    own values. `contributorThroughputSeries` and `mergeEventSeries` are the only exceptions to
+ *    there being no per-person comparison set at all, and both return merges in name order — the
+ *    ordering is the guarantee, so a ranking still cannot be read out of this module (design.md D10
+ *    as amended by `add-per-author-throughput`). `mergeEventSeries` is the same metric at a finer
+ *    resolution, not a further one: merges and nothing else, unweighted by what they contained.
  */
 import type { WorkspaceScope } from '../db/scope';
 import { buildPredicate, type MetricScope } from './aggregate';
@@ -126,10 +127,15 @@ export interface MetricBucket {
   mergedCount: number;
   /** Prorated contributor-equivalents in scope for this bucket (design.md D4). */
   contributors: number;
-  /** Merged pull requests per active contributor. Absent when the scope had none. */
+  /** Merged pull requests per active contributor. Absent only when nothing merged and nobody was. */
   throughputPerContributor: number | null;
   /** The same figure per contributor per day — the unit the published benchmark is stated in. */
   throughputPerContributorDay: number | null;
+  /**
+   * The bucket has merges but no denominator, so the two figures above are the merged count
+   * standing in for a rate rather than a rate (design.md D9). A surface drawing them says so.
+   */
+  denominatorMissing: boolean;
   latency: Record<LatencyMetric, DistributionSummary>;
   size: DistributionSummary;
   churn: ChurnSummary | null;
@@ -280,6 +286,11 @@ export async function metricSeries(
       ]),
     ) as Record<LatencyMetric, DistributionSummary>;
 
+    // Merges without a denominator: the two inputs contradict each other, and the one actually
+    // observed wins (design.md D9). Membership rows begin at first sync while ingested history
+    // reaches further back, so this is the ordinary shape of an early bucket, not an edge case.
+    const denominatorMissing = contributors === 0 && mergedCount > 0;
+
     const churnContributing = Number(row.churn_count ?? 0);
     const shares = churnShares(
       Number(row.new_code_lines ?? 0),
@@ -297,13 +308,23 @@ export async function metricSeries(
         start < options.coverageStart,
       mergedCount,
       contributors: Math.round(contributors * 1000) / 1000,
-      // Absent, not zero: a scope with no active contributors has no rate to state.
+      // Absent, not zero — but absence of a denominator may not erase a count that exists. A
+      // bucket with no contributors and nothing merged has no rate to state, so it stays absent.
+      // A bucket with no contributors and merges recorded reports the merged count, which is the
+      // value the rate takes at a denominator of one; `denominatorMissing` is how the surface says
+      // that is what it is showing (design.md D9).
       throughputPerContributor:
-        contributors > 0 ? Math.round((mergedCount / contributors) * 1000) / 1000 : null,
+        contributors > 0
+          ? Math.round((mergedCount / contributors) * 1000) / 1000
+          : denominatorMissing
+            ? mergedCount
+            : null,
       throughputPerContributorDay:
-        contributors > 0 && bucketDays > 0
-          ? Math.round((mergedCount / contributors / bucketDays) * 1000) / 1000
+        bucketDays > 0 && (contributors > 0 || denominatorMissing)
+          ? Math.round((mergedCount / (contributors > 0 ? contributors : 1) / bucketDays) * 1000) /
+            1000
           : null,
+      denominatorMissing,
       latency,
       size: summary(row, 'size', mergedCount, settings.minSampleSize),
       prMaturity: summary(row, 'maturity', mergedCount, settings.minSampleSize),
@@ -809,4 +830,146 @@ export async function contributorThroughputSeries(
   }
 
   return { buckets, contributors: [...byContributor.values()] };
+}
+
+/** One merged pull request, named well enough to be linked to rather than only counted. */
+export interface MergeEvent {
+  pullRequestId: string;
+  number: number;
+  title: string;
+  url: string | null;
+  repositoryFullName: string;
+  mergedAt: Date;
+}
+
+/** One author's merges in the period, in merge order. Never empty: see {@link mergeEventSeries}. */
+export interface ContributorMergeEvents {
+  contributorId: string;
+  /** Display name, falling back to the login when GitHub has no name for the account. */
+  name: string;
+  login: string;
+  events: MergeEvent[];
+  /** The defensive cap trimmed this author's events, so the last one is not their last merge. */
+  truncated: boolean;
+}
+
+export interface MergeEventSeries {
+  contributors: ContributorMergeEvents[];
+  /** From when the events are complete, so an uncovered span reads as missing, not as quiet. */
+  coverageStart: Date | null;
+  /** Any group was trimmed: a consumer must say so rather than present a short total as the total. */
+  truncated: boolean;
+}
+
+/**
+ * How many events one author may contribute before the query stops reading them.
+ *
+ * The period bounds the query and the period selector bounds the period, so an unbounded fetch is
+ * not reachable from the UI; this is the belt to that pair of braces. It is deliberately far above
+ * anything a person merges in a selectable period, because a series that quietly stopped short
+ * would disagree with the headline count — which is the one failure this chart exists to preclude.
+ */
+export const MAX_MERGE_EVENTS = 1000;
+
+/**
+ * Merged pull requests as individual events (spec: metric-aggregation "Merged pull requests are
+ * available as an event series").
+ *
+ * The same metric `metricSeries` buckets, at the resolution of the pull request itself: the count
+ * of events over a scope and period equals that scope and period's merged count, which is what
+ * lets a cumulative line and a headline tile be checked against each other rather than trusted to
+ * agree. Nothing is weighted — an event is one merge whatever it contained — and nothing is
+ * ranked: groups come back in name order, exactly as `contributorThroughputSeries` does, and a
+ * caller wanting people sorted by output has to sort them itself, in the open (design.md D10).
+ *
+ * Authors with no merged pull request in the period are absent rather than present with an empty
+ * group, for the same reason as there: a flat line per non-merging member says more about who is
+ * being watched than about the work.
+ *
+ * No running total is computed here. It is `index + 1` within a group, and a window function
+ * computing it would be a second definition of the total in a place that could drift from the
+ * count.
+ */
+export async function mergeEventSeries(
+  scope: WorkspaceScope,
+  filter: MetricScope,
+  options: Omit<SeriesOptions, 'granularity'> & { limit?: number } = {},
+): Promise<MergeEventSeries> {
+  const merged = buildPredicate(filter, { merged: true });
+  const params = [...merged.params];
+  const push = (value: unknown): string => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+  const limit = Math.max(1, options.limit ?? MAX_MERGE_EVENTS);
+  const limitParam = push(limit);
+
+  const { rows } = await scope.query<{
+    pull_request_id: string;
+    contributor_id: string;
+    login: string;
+    name: string | null;
+    number: number;
+    title: string;
+    url: string | null;
+    repository_full_name: string;
+    merged_at: Date;
+    total: string | number;
+  }>(
+    `WITH events AS (
+       SELECT a.pull_request_id,
+              a.author_contributor_id AS contributor_id,
+              a.merged_at,
+              pr.number, pr.title, pr.url,
+              r.full_name AS repository_full_name,
+              row_number() OVER (
+                PARTITION BY a.author_contributor_id ORDER BY a.merged_at, pr.number) AS event_rank,
+              count(*) OVER (PARTITION BY a.author_contributor_id) AS total
+         FROM pr_analysis a
+         JOIN pull_requests pr ON pr.id = a.pull_request_id
+         JOIN repositories r ON r.id = a.repository_id
+        WHERE ${merged.sql}
+          AND a.author_contributor_id IS NOT NULL
+     )
+     SELECT e.pull_request_id, e.contributor_id, e.number, e.title, e.url,
+            e.repository_full_name, e.merged_at, e.total,
+            c.login, c.name
+       FROM events e
+       JOIN contributors c ON c.id = e.contributor_id AND c.workspace_id = :workspace
+      WHERE e.event_rank <= ${limitParam}
+      -- By name, then by when the merge happened. Never by how many a person has: the ORDER BY is
+      -- where D10 is enforced, here as in contributorThroughputSeries.
+      ORDER BY lower(COALESCE(c.name, c.login)), c.login, e.merged_at, e.number`,
+    params,
+  );
+
+  const byContributor = new Map<string, ContributorMergeEvents>();
+  for (const row of rows) {
+    let group = byContributor.get(row.contributor_id);
+    if (!group) {
+      group = {
+        contributorId: row.contributor_id,
+        name: row.name ?? row.login,
+        login: row.login,
+        events: [],
+        truncated: Number(row.total) > limit,
+      };
+      byContributor.set(row.contributor_id, group);
+    }
+    group.events.push({
+      pullRequestId: row.pull_request_id,
+      number: row.number,
+      title: row.title,
+      url: row.url,
+      repositoryFullName: row.repository_full_name,
+      mergedAt: row.merged_at,
+    });
+  }
+
+  const contributors = [...byContributor.values()];
+  return {
+    contributors,
+    coverageStart: options.coverageStart ?? null,
+    truncated: contributors.some((group) => group.truncated),
+  };
 }

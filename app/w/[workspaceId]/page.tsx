@@ -36,6 +36,7 @@ import {
   ChurnChart,
   CommitActivityChart,
   ContributorThroughputChart,
+  CumulativeThroughputChart,
   MAX_SELECTED_AUTHORS,
   CycleTimePhaseChart,
   DistributionView,
@@ -44,6 +45,7 @@ import {
 } from '@/ui/metric-charts';
 import {
   contributorThroughputSeries,
+  mergeEventSeries,
   metricDistribution,
   metricSeries,
   workMixSeries,
@@ -190,35 +192,45 @@ export default async function TeamViewPage({
     access.visibleRepositoryIds,
   );
 
-  const [buckets, churnBuckets, sizeDistribution, cycleDistribution, workMix, authorThroughput] =
-    await Promise.all([
-      metricSeries(scope, filter, {
-        granularity,
-        settings,
-        coverageStart: status.coverageStart,
-      }),
-      metricSeries(scope, filter, {
-        granularity,
-        settings,
-        // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
-        // marks its own buckets rather than inheriting the pull request coverage start.
-        coverageStart: churnCoverage.start,
-      }),
-      metricDistribution(scope, filter, { metric: 'size', settings }),
-      metricDistribution(scope, filter, { metric: 'cycle_time', settings }),
-      classificationSettings.enabled
-        ? workMixSeries(scope, filter, {
-            granularity,
-            settings,
-            confidenceThreshold: classificationSettings.confidenceThreshold,
-          })
-        : Promise.resolve([]),
-      contributorThroughputSeries(scope, filter, {
-        granularity,
-        settings,
-        coverageStart: status.coverageStart,
-      }),
-    ]);
+  const [
+    buckets,
+    churnBuckets,
+    sizeDistribution,
+    cycleDistribution,
+    workMix,
+    authorThroughput,
+    mergeEvents,
+  ] = await Promise.all([
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      coverageStart: status.coverageStart,
+    }),
+    metricSeries(scope, filter, {
+      granularity,
+      settings,
+      // Churn coverage lags pull request coverage while the file fill-in runs, so the churn chart
+      // marks its own buckets rather than inheriting the pull request coverage start.
+      coverageStart: churnCoverage.start,
+    }),
+    metricDistribution(scope, filter, { metric: 'size', settings }),
+    metricDistribution(scope, filter, { metric: 'cycle_time', settings }),
+    classificationSettings.enabled
+      ? workMixSeries(scope, filter, {
+          granularity,
+          settings,
+          confidenceThreshold: classificationSettings.confidenceThreshold,
+        })
+      : Promise.resolve([]),
+    contributorThroughputSeries(scope, filter, {
+      granularity,
+      settings,
+      coverageStart: status.coverageStart,
+    }),
+    // The same team scope as the bucketed per-author chart, at per-pull-request resolution. Both
+    // charts then draw from one selection, so they cannot describe different people.
+    mergeEventSeries(scope, filter, { settings, coverageStart: status.coverageStart }),
+  ]);
 
   // The refactor share over the whole period, so the seeded `refactor_rate` band is read rather
   // than carried. Over the period's lines rather than an average of bucket shares: a quiet week
@@ -276,6 +288,11 @@ export default async function TeamViewPage({
     // back to the default and redraw the line the viewer just removed.
     return `${base}&authors=${next.join(',')}`;
   };
+
+  // Every other control carries the whole state, so changing one does not silently reset another:
+  // switching granularity used to drop the author selection and the churn unit.
+  const authorsQuery = query.authors === undefined ? '' : `&authors=${selectedAuthors.join(',')}`;
+  const churnQuery = `&churn=${churnAbsolute ? 'lines' : 'shares'}`;
 
   return (
     <main>
@@ -356,7 +373,7 @@ export default async function TeamViewPage({
           <GranularitySelector
             granularity={granularity}
             basePath={`/w/${workspaceId}`}
-            query={chartQuery}
+            query={`${chartQuery}${churnQuery}${authorsQuery}`}
           />
         }
       >
@@ -371,6 +388,14 @@ export default async function TeamViewPage({
           hrefFor={authorsHref}
           drillThrough={drillThrough}
         />
+        {/* The same authors as the chart above, so the two never describe different people. */}
+        <CumulativeThroughputChart
+          data={mergeEvents}
+          periodStart={period.start}
+          periodEnd={period.end}
+          selected={selectedAuthors}
+          timeZone={settings.timeZone}
+        />
         <CycleTimePhaseChart
           buckets={buckets}
           drillThrough={drillThrough}
@@ -382,7 +407,7 @@ export default async function TeamViewPage({
           absolute={churnAbsolute}
           toggleHref={`/w/${workspaceId}?${chartQuery}&granularity=${granularity}&churn=${
             churnAbsolute ? 'shares' : 'lines'
-          }`}
+          }${authorsQuery}`}
           coveredFrom={churnCoverage.start}
           reworkThreshold={reworkThreshold}
           refactorThreshold={refactorThreshold}

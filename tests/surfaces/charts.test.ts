@@ -11,14 +11,20 @@ import { describe, expect, it } from 'vitest';
 import {
   ChurnChart,
   ContributorThroughputChart,
+  CumulativeThroughputChart,
   CycleTimePhaseChart,
   MAX_SELECTED_AUTHORS,
   ThroughputChart,
   WorkMixView,
 } from '../../src/ui/metric-charts';
-import { LineChart, StackedBarChart, seriesEncoding } from '../../src/ui/charts';
+import { LineChart, MAX_EVENT_MARKS, StackedBarChart, seriesEncoding } from '../../src/ui/charts';
 import { parseGranularity } from '../../src/ui/format';
-import type { ContributorThroughput, MetricBucket, WorkMixBucket } from '../../src/analysis/series';
+import type {
+  ContributorThroughput,
+  MergeEventSeries,
+  MetricBucket,
+  WorkMixBucket,
+} from '../../src/analysis/series';
 
 const emptySummary = {
   p50: null,
@@ -39,6 +45,7 @@ function bucket(overrides: Partial<MetricBucket> & { label: string }): MetricBuc
     contributors: 0,
     throughputPerContributor: null,
     throughputPerContributorDay: null,
+    denominatorMissing: false,
     latency: {
       cycle_time: emptySummary,
       coding_time: emptySummary,
@@ -390,5 +397,192 @@ describe('per-author throughput chart', () => {
 
     expect(html).toContain('No authors selected.');
     expect(html).not.toContain('No buckets in this period.');
+  });
+});
+
+/**
+ * The two throughput variants (design.md D8). They plot different quantities, so each says which
+ * one it is: a rate on the team, where the denominator is other people, and a count on the
+ * personal view, where the denominator would be the viewer themselves.
+ */
+describe('the throughput chart variants', () => {
+  const tier = {
+    metric: 'pr_throughput',
+    tier: 'elite' as const,
+    lowerBound: 1,
+    upperBound: null,
+    unit: 'count' as const,
+    source: 'A published study',
+    studyDate: new Date('2026-01-01T00:00:00Z'),
+    thresholds: [],
+  };
+
+  it('states counts on the personal variant, with no tier and no per-contributor claim', () => {
+    const html = render(
+      ThroughputChart({
+        variant: 'count',
+        buckets: [bucket({ label: 'week 1', mergedCount: 8, throughputPerContributor: 4 })],
+        // Offered and ignored: a published band stated per contributor per day says nothing about
+        // a raw count, and the personal view presents no tier for the viewer's own values.
+        benchmark: tier,
+      }),
+    );
+
+    expect(html).toContain('Merged pull requests');
+    expect(html).not.toContain('per contributor');
+    expect(html).not.toContain('benchmark-tier');
+    expect(html).not.toContain('Published industry data');
+    // The count, not the rate that shares its bucket.
+    expect(html).toContain('>8<');
+  });
+
+  it('keeps the rate and its tier on the team variant', () => {
+    const html = render(
+      ThroughputChart({
+        buckets: [bucket({ label: 'week 1', mergedCount: 8, throughputPerContributor: 4 })],
+        benchmark: tier,
+      }),
+    );
+
+    expect(html).toContain('PR throughput per contributor');
+    expect(html).toContain('benchmark-tier');
+    expect(html).toContain('Published industry data');
+  });
+
+  it('says a bucket with merges and no denominator is a count standing in for a rate', () => {
+    const html = render(
+      ThroughputChart({
+        buckets: [
+          bucket({
+            label: 'week 1',
+            mergedCount: 3,
+            throughputPerContributor: 3,
+            denominatorMissing: true,
+          }),
+        ],
+      }),
+    );
+
+    // Legible rather than silent: the number moved, and the chart says why (design.md D9).
+    expect(html).toContain('standing in for a rate');
+  });
+});
+
+/**
+ * The cumulative event chart (spec: "Merged throughput is presentable per pull request").
+ *
+ * Its correctness condition is structural: the line starts at zero where the period starts and is
+ * carried flat to where it ends, so its final value is the period's total rather than wherever the
+ * last merge happened to fall (design.md D3).
+ */
+describe('the cumulative merge chart', () => {
+  const periodStart = new Date('2026-05-01T00:00:00Z');
+  const periodEnd = new Date('2026-05-11T00:00:00Z');
+  const hours = (n: number) => new Date(periodStart.getTime() + n * 3600_000);
+
+  const events = (count: number, spacingHours = 12): MergeEventSeries => ({
+    contributors: [
+      {
+        contributorId: 'a',
+        name: 'Ada',
+        login: 'ada',
+        truncated: false,
+        events: Array.from({ length: count }, (_, index) => ({
+          pullRequestId: `pr-${index}`,
+          number: 100 + index,
+          title: `Change ${index}`,
+          url: `https://github.com/acme/repo/pull/${100 + index}`,
+          repositoryFullName: 'acme/repo',
+          mergedAt: hours((index + 1) * spacingHours),
+        })),
+      },
+    ],
+    coverageStart: null,
+    truncated: false,
+  });
+
+  const cumulative = (data: MergeEventSeries) =>
+    render(CumulativeThroughputChart({ data, periodStart, periodEnd }));
+
+  const pathOf = (html: string): string => /<path[^>]*\sd="([^"]+)"/.exec(html)![1]!;
+
+  it('steps horizontally then vertically, with no diagonal between events', () => {
+    const path = pathOf(cumulative(events(3)));
+
+    // Every segment is an axis-aligned move. A lineto would draw a fractional pull request at an
+    // instant the total was not that (design.md D2).
+    expect(path).not.toContain('L');
+    expect(path).toMatch(/^M[\d.]+,[\d.]+(?: H[\d.]+ V[\d.]+)+ H[\d.]+$/);
+  });
+
+  it('starts at zero at the period start and holds its final value to the period end', () => {
+    const path = pathOf(cumulative(events(2)));
+
+    // The plot's left edge at the baseline: 44 across, 192 down.
+    expect(path.startsWith('M44,192')).toBe(true);
+    // …and carried to the right edge at the height of the last event, which is the period total.
+    expect(path.endsWith('H708')).toBe(true);
+    const verticals = [...path.matchAll(/V([\d.]+)/g)].map((match) => Number(match[1]));
+    // Two events over a ceiling of two: the last one reaches the top of the plot.
+    expect(verticals.at(-1)).toBe(12);
+  });
+
+  it('thins the marks past the cap while the line and the table keep every event', () => {
+    const count = MAX_EVENT_MARKS + 20;
+    const html = cumulative(events(count, 1));
+
+    const marks = [...html.matchAll(/<circle /g)];
+    expect(marks.length).toBeLessThanOrEqual(MAX_EVENT_MARKS);
+    expect(marks.length).toBeLessThan(count);
+    // The guarantee is on the path and the text, never on the circle count (design.md D5).
+    expect([...pathOf(html).matchAll(/V/g)]).toHaveLength(count);
+    expect([...html.matchAll(/<tr>/g)]).toHaveLength(count + 1);
+    // Including the ones no longer drawn.
+    expect(html).toContain(`#${100 + count - 1} Change ${count - 1}`);
+  });
+
+  it('links each drawn mark to its pull request and names it by number and title', () => {
+    const html = cumulative(events(2));
+
+    expect(html).toContain('href="https://github.com/acme/repo/pull/100"');
+    expect(html).toContain('#100 Change 0');
+    // The identity is in the mark's own title, so a pointer reveals it without a tooltip layer.
+    expect(html).toMatch(/<title>[^<]*#100 Change 0[^<]*<\/title>/);
+  });
+
+  it('hatches and names the span of the period before coverage', () => {
+    const html = render(
+      CumulativeThroughputChart({
+        data: { ...events(2), coverageStart: new Date('2026-05-04T00:00:00Z') },
+        periodStart,
+        periodEnd,
+      }),
+    );
+
+    expect(html).toContain('url(#hatch-');
+    expect(html).toContain('fall outside recorded coverage');
+    // Missing data, not a quiet stretch: the two must not read the same.
+    expect(html).toContain('missing data rather than a quiet stretch');
+  });
+
+  it('states that nothing merged rather than drawing a line at zero', () => {
+    const html = render(
+      CumulativeThroughputChart({
+        data: { contributors: [], coverageStart: null, truncated: false },
+        periodStart,
+        periodEnd,
+      }),
+    );
+
+    expect(html).toContain('No pull requests merged in this period.');
+    // A flat line at zero would assert a measurement over a span that may not even be covered.
+    expect(html).not.toContain('<path');
+    expect(html).not.toContain('No buckets in this period.');
+  });
+
+  it('says when the cap trimmed events rather than ending short in silence', () => {
+    const html = cumulative({ ...events(2), truncated: true });
+
+    expect(html).toContain('stops short of the count stated above');
   });
 });
