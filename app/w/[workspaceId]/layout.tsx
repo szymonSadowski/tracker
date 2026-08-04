@@ -39,6 +39,11 @@ export default async function WorkspaceLayout({
           ) : null}
         </nav>
         <span className="spacer" />
+        <nav>
+          {/* Permanent entry point to the workspace list, which is also where another
+              installation is started (design.md D4). */}
+          <Link href="/dashboard?list=1">Workspaces</Link>
+        </nav>
         {workspaces.length > 1 ? (
           <nav>
             {workspaces

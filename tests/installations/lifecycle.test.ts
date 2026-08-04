@@ -195,6 +195,48 @@ describe('installation lifecycle', () => {
     expect(prs.rows).toHaveLength(1);
   });
 
+  it('installing on an organization adds a workspace beside the personal one', async () => {
+    const user = await seedUser(db(), { login: 'octo' });
+    const personalRepository: RestRepository = {
+      ...repository('notes'),
+      full_name: 'octo/notes',
+      owner: { login: 'octo', id: 2, node_id: 'U_octo', type: 'User' },
+    };
+    const gateway = new FakeGateway(
+      {
+        id: 555,
+        account: { node_id: 'U_octo', login: 'octo', type: 'User' },
+        repository_selection: 'selected',
+      },
+      [personalRepository],
+    );
+    const personal = await ingestInstallation(db(), gateway, 555, user.id);
+
+    // The same operator now installs on an organization they own.
+    gateway.installation = installationDetails(777);
+    gateway.repositories = [repository('api')];
+    const organization = await ingestInstallation(db(), gateway, 777, user.id);
+
+    expect(organization.workspaceId).not.toBe(personal.workspaceId);
+    expect(organization.workspaceCreated).toBe(true);
+    const { rows } = await db().query<{ workspace_id: string; role: string }>(
+      'SELECT workspace_id, role FROM workspace_members WHERE user_id = $1',
+      [user.id],
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.role === 'owner')).toBe(true);
+    expect(rows.map((row) => row.workspace_id).sort()).toEqual(
+      [personal.workspaceId, organization.workspaceId].sort(),
+    );
+    // The personal workspace's scope is untouched by the second installation.
+    expect((await listRepositories(db(), personal.workspaceId)).map((r) => r.fullName)).toEqual([
+      'octo/notes',
+    ]);
+    expect((await listRepositories(db(), organization.workspaceId)).map((r) => r.fullName)).toEqual(
+      ['acme/api'],
+    );
+  });
+
   it('parks an installation whose credentials GitHub rejects', async () => {
     const gateway = new FakeGateway(installationDetails(), [repository('api')]);
     const { workspaceId } = await ingestInstallation(db(), gateway, 555);
