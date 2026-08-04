@@ -229,7 +229,11 @@ export default async function TeamViewPage({
     }),
     // The same team scope as the bucketed per-author chart, at per-pull-request resolution. Both
     // charts then draw from one selection, so they cannot describe different people.
-    mergeEventSeries(scope, filter, { settings, coverageStart: status.coverageStart }),
+    mergeEventSeries(scope, filter, {
+      settings,
+      coverageStart: status.coverageStart,
+      contributorIds: selectedAuthors,
+    }),
   ]);
 
   // The refactor share over the whole period, so the seeded `refactor_rate` band is read rather
